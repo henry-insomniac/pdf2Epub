@@ -35,6 +35,9 @@ func TestLoadDefaults(t *testing.T) {
 	if got.MaxPages != 1000 {
 		t.Fatalf("MaxPages = %d", got.MaxPages)
 	}
+	if got.FixedLayoutDPI != 144 {
+		t.Fatalf("FixedLayoutDPI = %d", got.FixedLayoutDPI)
+	}
 	if got.JobTimeout != 30*time.Minute {
 		t.Fatalf("JobTimeout = %s", got.JobTimeout)
 	}
@@ -49,6 +52,17 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if got.DownloadURLTTL != 15*time.Minute {
 		t.Fatalf("DownloadURLTTL = %s", got.DownloadURLTTL)
+	}
+}
+
+func TestLoadValidatesFixedLayoutDPI(t *testing.T) {
+	t.Setenv("BTC_USERNAME", "admin")
+	t.Setenv("BTC_PASSWORD", "correct horse battery staple")
+	t.Setenv("BTC_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("BTC_FIXED_LAYOUT_DPI", "240")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want invalid fixed layout DPI error")
 	}
 }
 

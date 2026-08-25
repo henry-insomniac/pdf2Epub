@@ -18,6 +18,7 @@ type Config struct {
 	WorkDir          string
 	MaxUploadBytes   int64
 	MaxPages         int
+	FixedLayoutDPI   int
 	JobTimeout       time.Duration
 	Retention        time.Duration
 	ShutdownTimeout  time.Duration
@@ -43,6 +44,7 @@ func Load() (Config, error) {
 		WorkDir:          envOrDefault("BTC_WORK_DIR", "/tmp/pdf2epub"),
 		MaxUploadBytes:   100 << 20,
 		MaxPages:         1000,
+		FixedLayoutDPI:   144,
 		JobTimeout:       30 * time.Minute,
 		Retention:        time.Hour,
 		ShutdownTimeout:  15 * time.Second,
@@ -78,6 +80,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("BTC_DOWNLOAD_URL_TTL must be a positive duration: %q", value)
 		}
 		cfg.DownloadURLTTL = duration
+	}
+	if value := strings.TrimSpace(os.Getenv("BTC_FIXED_LAYOUT_DPI")); value != "" {
+		dpi, err := strconv.Atoi(value)
+		if err != nil || dpi < 72 || dpi > 200 {
+			return Config{}, fmt.Errorf("BTC_FIXED_LAYOUT_DPI must be between 72 and 200: %q", value)
+		}
+		cfg.FixedLayoutDPI = dpi
 	}
 	return cfg, nil
 }

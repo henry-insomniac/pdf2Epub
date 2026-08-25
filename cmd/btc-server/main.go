@@ -30,6 +30,7 @@ func main() {
 		RequireEPUBCheck:     cfg.RequireEPUBCheck,
 		CoverDPI:             120,
 		IllustrationDPI:      110,
+		FixedLayoutDPI:       cfg.FixedLayoutDPI,
 		MaxIllustrationsPage: 12,
 	})
 	if err != nil {

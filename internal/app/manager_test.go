@@ -40,11 +40,11 @@ func TestManagerRunsOneJobAndRetainsArtifact(t *testing.T) {
 	}
 	t.Cleanup(manager.Close)
 
-	first, err := manager.Submit("book.pdf", bytes.NewBufferString("%PDF test"))
+	first, err := manager.Submit("book.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test"))
 	if err != nil {
 		t.Fatalf("Submit(): %v", err)
 	}
-	if _, err := manager.Submit("second.pdf", bytes.NewBufferString("%PDF test")); !errors.Is(err, ErrBusy) {
+	if _, err := manager.Submit("second.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test")); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second Submit() error = %v, want ErrBusy", err)
 	}
 	close(release)
@@ -89,7 +89,7 @@ func TestManagerPublishesArtifactAndReturnsSignedDownload(t *testing.T) {
 	}
 	t.Cleanup(manager.Close)
 
-	job, err := manager.Submit("中文书名.pdf", bytes.NewBufferString("%PDF test"))
+	job, err := manager.Submit("中文书名.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test"))
 	if err != nil {
 		t.Fatalf("Submit(): %v", err)
 	}
@@ -134,7 +134,7 @@ func TestManagerFallsBackToLocalDownloadWhenPublishFails(t *testing.T) {
 	}
 	t.Cleanup(manager.Close)
 
-	job, err := manager.Submit("book.pdf", bytes.NewBufferString("%PDF test"))
+	job, err := manager.Submit("book.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test"))
 	if err != nil {
 		t.Fatalf("Submit(): %v", err)
 	}
@@ -171,7 +171,7 @@ func TestManagerCancelsAndReleasesSlot(t *testing.T) {
 	}
 	t.Cleanup(manager.Close)
 
-	job, err := manager.Submit("book.pdf", bytes.NewBufferString("%PDF test"))
+	job, err := manager.Submit("book.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test"))
 	if err != nil {
 		t.Fatalf("Submit(): %v", err)
 	}
@@ -184,7 +184,7 @@ func TestManagerCancelsAndReleasesSlot(t *testing.T) {
 		t.Fatalf("status = %q, want canceled", finished.Status)
 	}
 
-	if _, err := manager.Submit("next.pdf", bytes.NewBufferString("%PDF next")); err != nil {
+	if _, err := manager.Submit("next.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF next")); err != nil {
 		t.Fatalf("Submit() after cancel: %v", err)
 	}
 }
@@ -204,7 +204,7 @@ func TestManagerTimesOutJob(t *testing.T) {
 	}
 	t.Cleanup(manager.Close)
 
-	job, err := manager.Submit("book.pdf", bytes.NewBufferString("%PDF test"))
+	job, err := manager.Submit("book.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test"))
 	if err != nil {
 		t.Fatalf("Submit(): %v", err)
 	}
@@ -228,8 +228,18 @@ func TestManagerRejectsOversizedUpload(t *testing.T) {
 	}
 	t.Cleanup(manager.Close)
 
-	if _, err := manager.Submit("book.pdf", bytes.NewBufferString("12345")); !errors.Is(err, ErrUploadTooLarge) {
+	if _, err := manager.Submit("book.pdf", ConversionModeAuto, bytes.NewBufferString("12345")); !errors.Is(err, ErrUploadTooLarge) {
 		t.Fatalf("Submit() error = %v, want ErrUploadTooLarge", err)
+	}
+}
+
+func TestParseConversionModeDefaultsToAutoAndRejectsUnknown(t *testing.T) {
+	mode, err := ParseConversionMode("")
+	if err != nil || mode != ConversionModeAuto {
+		t.Fatalf("empty mode = %q, %v", mode, err)
+	}
+	if _, err := ParseConversionMode("sideways"); !errors.Is(err, ErrInvalidMode) {
+		t.Fatalf("unknown mode error = %v, want ErrInvalidMode", err)
 	}
 }
 

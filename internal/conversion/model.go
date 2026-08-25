@@ -26,7 +26,16 @@ type Image struct {
 	Name      string
 	MediaType string
 	Data      []byte
+	Width     int
+	Height    int
 }
+
+type Layout string
+
+const (
+	LayoutReflowable Layout = "reflowable"
+	LayoutFixed      Layout = "fixed"
+)
 
 type OutlineItem struct {
 	Title string
@@ -43,11 +52,14 @@ type Book struct {
 	Cover    Image
 	Images   []Image
 	Warnings []Warning
+	Layout   Layout
 }
 
 type Section struct {
-	Page   int
-	Blocks []Block
+	Page           int
+	Blocks         []Block
+	ViewportWidth  int
+	ViewportHeight int
 }
 
 type BlockKind string

@@ -19,11 +19,33 @@ import (
 
 var (
 	ErrBusy                = errors.New("a conversion job is already active")
+	ErrInvalidMode         = errors.New("invalid conversion mode")
 	ErrJobNotFound         = errors.New("job not found")
 	ErrNotCancelable       = errors.New("job cannot be canceled")
 	ErrUploadTooLarge      = errors.New("upload exceeds configured limit")
 	ErrArtifactUnavailable = errors.New("artifact is not available")
 )
+
+type ConversionMode string
+
+const (
+	ConversionModeAuto       ConversionMode = "auto"
+	ConversionModeReflowable ConversionMode = "reflowable"
+	ConversionModeFixed      ConversionMode = "fixed"
+)
+
+func ParseConversionMode(value string) (ConversionMode, error) {
+	mode := ConversionMode(strings.ToLower(strings.TrimSpace(value)))
+	if mode == "" {
+		return ConversionModeAuto, nil
+	}
+	switch mode {
+	case ConversionModeAuto, ConversionModeReflowable, ConversionModeFixed:
+		return mode, nil
+	default:
+		return "", ErrInvalidMode
+	}
+}
 
 type ManagerConfig struct {
 	WorkDir           string
@@ -39,6 +61,7 @@ type ConversionRequest struct {
 	SourcePath string
 	SourceName string
 	JobDir     string
+	Mode       ConversionMode
 }
 
 type ConversionResult struct {
@@ -80,6 +103,7 @@ type managedJob struct {
 	sourcePath string
 	cancel     context.CancelFunc
 	done       chan struct{}
+	mode       ConversionMode
 }
 
 type Manager struct {
@@ -132,7 +156,11 @@ func NewManager(config ManagerConfig, converter Converter) (*Manager, error) {
 	}, nil
 }
 
-func (m *Manager) Submit(sourceName string, input io.Reader) (domain.Snapshot, error) {
+func (m *Manager) Submit(sourceName string, mode ConversionMode, input io.Reader) (domain.Snapshot, error) {
+	mode, err := ParseConversionMode(string(mode))
+	if err != nil {
+		return domain.Snapshot{}, err
+	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -154,7 +182,7 @@ func (m *Manager) Submit(sourceName string, input io.Reader) (domain.Snapshot, e
 	}
 	sourcePath := filepath.Join(jobDir, "source.pdf")
 	job := domain.NewJob(id, safeSourceName(sourceName), 0)
-	managed := &managedJob{job: job, jobDir: jobDir, sourcePath: sourcePath, done: make(chan struct{})}
+	managed := &managedJob{job: job, jobDir: jobDir, sourcePath: sourcePath, done: make(chan struct{}), mode: mode}
 	m.jobs[id] = managed
 	m.activeID = id
 	m.mu.Unlock()
@@ -262,6 +290,7 @@ func (m *Manager) run(ctx context.Context, managed *managedJob) {
 		SourcePath: managed.sourcePath,
 		SourceName: managed.job.Snapshot().SourceName,
 		JobDir:     managed.jobDir,
+		Mode:       managed.mode,
 	}, jobReporter{job: managed.job})
 
 	snapshot := managed.job.Snapshot()
@@ -301,13 +330,13 @@ func (m *Manager) run(ctx context.Context, managed *managedJob) {
 			_ = os.RemoveAll(managed.jobDir)
 		}
 	}
+	_ = os.Remove(managed.sourcePath)
 	if err := managed.job.Succeed(result.Artifact); err != nil {
 		m.deleteStoredArtifact(result.Artifact)
 		_ = os.RemoveAll(managed.jobDir)
 		m.finish(managed)
 		return
 	}
-	_ = os.Remove(managed.sourcePath)
 	m.finish(managed)
 }
 

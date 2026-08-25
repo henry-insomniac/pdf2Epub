@@ -158,7 +158,12 @@ func (a *API) handleCreateJob(w http.ResponseWriter, r *http.Request, _ auth.Ses
 		writeError(w, http.StatusUnsupportedMediaType, "input.not_pdf", "所选文件不是有效的 PDF，请重新选择。")
 		return
 	}
-	snapshot, err := a.jobs.Submit(header.Filename, file)
+	mode, err := app.ParseConversionMode(r.FormValue("mode"))
+	if errors.Is(err, app.ErrInvalidMode) {
+		writeError(w, http.StatusBadRequest, "input.invalid_conversion_mode", "转换模式无效，请重新选择。")
+		return
+	}
+	snapshot, err := a.jobs.Submit(header.Filename, mode, file)
 	if errors.Is(err, app.ErrBusy) {
 		writeError(w, http.StatusConflict, "job.active_exists", "已有 PDF 正在转换，请等待当前任务结束或先取消它。")
 		return

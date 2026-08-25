@@ -70,3 +70,47 @@ func TestStructuredLinesGroupsFragmentsOnSameVisualLine(t *testing.T) {
 		t.Fatalf("unexpected lines: %#v", lines)
 	}
 }
+
+func TestShouldUseFixedLayoutForRepeatedWatermarkOverPageImages(t *testing.T) {
+	probes := make([]pageLayoutProbe, 8)
+	for index := range probes {
+		probes[index] = pageLayoutProbe{textFingerprint: "haitianyilulu haitianyilulu", largestImageCoverage: 0.79}
+	}
+	if !shouldUseFixedLayout(probes) {
+		t.Fatal("repeated watermark over full-page images should select fixed layout")
+	}
+}
+
+func TestShouldKeepReflowableLayoutForDistinctPageText(t *testing.T) {
+	probes := []pageLayoutProbe{
+		{textFingerprint: "first page has extractable body text", largestImageCoverage: 0.12},
+		{textFingerprint: "second page has different body text", largestImageCoverage: 0.18},
+		{textFingerprint: "third page continues the book", largestImageCoverage: 0.08},
+	}
+	if shouldUseFixedLayout(probes) {
+		t.Fatal("distinct extractable text should remain reflowable")
+	}
+}
+
+func TestShouldUseFixedLayoutForScannedPagesWithoutText(t *testing.T) {
+	probes := []pageLayoutProbe{
+		{largestImageCoverage: 0.94},
+		{largestImageCoverage: 0.91},
+		{largestImageCoverage: 0.89},
+	}
+	if !shouldUseFixedLayout(probes) {
+		t.Fatal("scanned full-page images should select fixed layout")
+	}
+}
+
+func TestSamplePageIndexesCoversBeginningMiddleAndEnd(t *testing.T) {
+	got := samplePageIndexes(256, 8)
+	if len(got) != 8 || got[0] != 0 || got[len(got)-1] != 255 {
+		t.Fatalf("sample indexes = %#v", got)
+	}
+	for index := 1; index < len(got); index++ {
+		if got[index] <= got[index-1] {
+			t.Fatalf("sample indexes are not increasing: %#v", got)
+		}
+	}
+}

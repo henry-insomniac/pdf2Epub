@@ -151,13 +151,22 @@ func writeDeflated(archive *zip.Writer, name string, data []byte) error {
 func packageOPF(book conversion.Book, modified time.Time) string {
 	identifier := bookIdentifier(book)
 	var manifest, spine strings.Builder
+	fixedLayout := book.Layout == conversion.LayoutFixed
 	manifest.WriteString(`<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="css" href="styles.css" media-type="text/css"/>`)
 	if len(book.Cover.Data) > 0 {
 		fmt.Fprintf(&manifest, `<item id="cover" href="images/%s" media-type="%s" properties="cover-image"/>`, escape(book.Cover.Name), escape(book.Cover.MediaType))
 	}
 	for index := range book.Sections {
 		fmt.Fprintf(&manifest, `<item id="section-%d" href="sections/section-%04d.xhtml" media-type="application/xhtml+xml"/>`, index+1, index+1)
-		fmt.Fprintf(&spine, `<itemref idref="section-%d"/>`, index+1)
+		if fixedLayout {
+			spread := "page-spread-right"
+			if index%2 == 1 {
+				spread = "page-spread-left"
+			}
+			fmt.Fprintf(&spine, `<itemref idref="section-%d" properties="%s"/>`, index+1, spread)
+		} else {
+			fmt.Fprintf(&spine, `<itemref idref="section-%d"/>`, index+1)
+		}
 	}
 	for index, image := range book.Images {
 		fmt.Fprintf(&manifest, `<item id="image-%d" href="images/%s" media-type="%s"/>`, index+1, escape(image.Name), escape(image.MediaType))
@@ -166,10 +175,16 @@ func packageOPF(book conversion.Book, modified time.Time) string {
 	if book.Author != "" {
 		creator = `<dc:creator>` + escape(book.Author) + `</dc:creator>`
 	}
+	layoutMetadata := ""
+	spineAttributes := ""
+	if fixedLayout {
+		layoutMetadata = `<meta property="rendition:layout">pre-paginated</meta><meta property="rendition:orientation">auto</meta><meta property="rendition:spread">both</meta>`
+		spineAttributes = ` page-progression-direction="ltr"`
+	}
 	return `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="book-id" version="3.0" xml:lang="` + escape(book.Language) + `">` +
-		`<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="book-id">urn:sha256:` + identifier + `</dc:identifier><dc:title>` + escape(book.Title) + `</dc:title>` + creator + `<dc:language>` + escape(book.Language) + `</dc:language><meta property="dcterms:modified">` + modified.Format("2006-01-02T15:04:05Z") + `</meta></metadata>` +
-		`<manifest>` + manifest.String() + `</manifest><spine>` + spine.String() + `</spine></package>`
+		`<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="book-id">urn:sha256:` + identifier + `</dc:identifier><dc:title>` + escape(book.Title) + `</dc:title>` + creator + `<dc:language>` + escape(book.Language) + `</dc:language><meta property="dcterms:modified">` + modified.Format("2006-01-02T15:04:05Z") + `</meta>` + layoutMetadata + `</metadata>` +
+		`<manifest>` + manifest.String() + `</manifest><spine` + spineAttributes + `>` + spine.String() + `</spine></package>`
 }
 
 func navXHTML(book conversion.Book) string {
@@ -185,6 +200,9 @@ func navXHTML(book conversion.Book) string {
 }
 
 func sectionXHTML(book conversion.Book, section conversion.Section, index int) string {
+	if book.Layout == conversion.LayoutFixed {
+		return fixedSectionXHTML(book, section)
+	}
 	var body strings.Builder
 	for _, block := range section.Blocks {
 		switch block.Kind {
@@ -206,6 +224,22 @@ func sectionXHTML(book conversion.Book, section conversion.Section, index int) s
 	}
 	title := fmt.Sprintf("第 %d 页", section.Page)
 	return `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" lang="` + escape(book.Language) + `"><head><title>` + escape(title) + `</title><link rel="stylesheet" type="text/css" href="../styles.css"/></head><body><section id="page-` + fmt.Sprint(section.Page) + `" data-source-page="` + fmt.Sprint(section.Page) + `">` + body.String() + `</section></body></html>`
+}
+
+func fixedSectionXHTML(book conversion.Book, section conversion.Section) string {
+	width, height := section.ViewportWidth, section.ViewportHeight
+	if width <= 0 || height <= 0 {
+		width, height = 1200, 1600
+	}
+	imageName := ""
+	for _, block := range section.Blocks {
+		if block.Kind == conversion.BlockImage {
+			imageName = block.ImageName
+			break
+		}
+	}
+	title := fmt.Sprintf("第 %d 页", section.Page)
+	return `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" lang="` + escape(book.Language) + `"><head><title>` + escape(title) + `</title><meta name="viewport" content="width=` + fmt.Sprint(width) + `, height=` + fmt.Sprint(height) + `"/><link rel="stylesheet" type="text/css" href="../styles.css"/></head><body class="fixed-page"><div class="page-frame"><img src="../images/` + escape(imageName) + `" alt="源 PDF 第 ` + fmt.Sprint(section.Page) + ` 页"/></div></body></html>`
 }
 
 func sectionIndexForPage(sections []conversion.Section, page int) int {
@@ -244,4 +278,4 @@ func SafeOutputName(sourceName string) string {
 
 const containerXML = `<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`
 
-const stylesCSS = `:root{color-scheme:light dark}body{font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif;line-height:1.75;max-width:42rem;margin:0 auto;padding:5%;overflow-wrap:anywhere}p{margin:.8em 0;text-align:start}h1,h2,h3,h4,h5,h6{line-height:1.3;margin:1.6em 0 .65em;break-after:avoid}img{display:block;max-width:100%;height:auto;margin:auto}figure{margin:1.5em 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:1em;background:rgba(127,127,127,.12)}a{color:inherit;text-decoration-thickness:.08em}`
+const stylesCSS = `:root{color-scheme:light dark}body{font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif;line-height:1.75;max-width:42rem;margin:0 auto;padding:5%;overflow-wrap:anywhere}p{margin:.8em 0;text-align:start}h1,h2,h3,h4,h5,h6{line-height:1.3;margin:1.6em 0 .65em;break-after:avoid}img{display:block;max-width:100%;height:auto;margin:auto}figure{margin:1.5em 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:1em;background:rgba(127,127,127,.12)}a{color:inherit;text-decoration-thickness:.08em}body.fixed-page{width:100%;height:100%;max-width:none;margin:0;padding:0;overflow:hidden;background:#fff}.page-frame{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}.page-frame img{width:100%;height:100%;max-width:none;object-fit:contain;margin:0}`

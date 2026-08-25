@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="将带文本层的图书型 PDF 转为可重排 EPUB 3。">
+  <meta name="description" content="将 PDF 自动转换为可重排或固定版式 EPUB 3。">
   <title>纸间 · PDF 转 EPUB</title>
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/mode.css">
 </head>
 <body>
   <header class="masthead">
@@ -15,9 +16,9 @@
 
   <main>
     <section class="hero" aria-labelledby="heroTitle">
-      <p class="eyebrow">PDF → REFLOWABLE EPUB 3</p>
-      <h1 id="heroTitle">把固定的纸页，<br>变成会呼吸的文字。</h1>
-      <p class="intro">上传带文本层的单栏图书型 PDF。服务会重建段落、目录与插图，校验完成后提供 EPUB 下载。</p>
+      <p class="eyebrow">PDF → ADAPTIVE EPUB 3</p>
+      <h1 id="heroTitle">文字自由流动，<br>版面也能原样保留。</h1>
+      <p class="intro">普通图书自动重建为可重排 EPUB；图片型与复杂版式 PDF 自动保留整页排版，并支持阅读器双页展开。</p>
     </section>
 
     <section id="loginPanel" class="panel login-panel" aria-labelledby="loginTitle">
@@ -44,8 +45,14 @@
           <input id="fileInput" name="file" type="file" accept="application/pdf,.pdf" required>
           <span class="upload-icon" aria-hidden="true">↑</span>
           <strong id="fileLabel">拖入 PDF，或点击选择</strong>
-          <span>扫描件、双栏论文、复杂杂志版式暂不支持</span>
+          <span>自动识别文本型与图片型 PDF，也可以手动指定输出版式</span>
         </label>
+        <fieldset class="mode-picker">
+          <legend>转换模式</legend>
+          <label><input type="radio" name="mode" value="auto" checked><span><strong>自动选择</strong><small>根据 PDF 内容选择最佳版式</small></span></label>
+          <label><input type="radio" name="mode" value="reflowable"><span><strong>可重排</strong><small>文字可调字号，适合正文型图书</small></span></label>
+          <label><input type="radio" name="mode" value="fixed"><span><strong>固定双页</strong><small>保留原页面，适合图片和复杂排版</small></span></label>
+        </fieldset>
         <div class="upload-actions">
           <button id="submitButton" class="primary-button" type="submit" disabled>开始转换</button>
           <button id="clearButton" class="text-button" type="button" hidden>重新选择</button>
@@ -70,7 +77,7 @@
     <div id="message" class="message" role="alert" hidden></div>
   </main>
 
-  <footer><span>不提供 OCR，也不会把正文悄悄变成整页图片。</span><span>任务与文件在结束 1 小时后清理。</span></footer>
+  <footer><span>固定版式保留页面外观；可重排模式不提供 OCR。</span><span>任务与文件在结束 1 小时后清理。</span></footer>
   <script src="/app.js" defer></script>
 </body>
 </html>

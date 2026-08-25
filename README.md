@@ -1,6 +1,6 @@
 # 纸间（btc-server）
 
-使用 Go 构建、可部署到服务器的 PDF → 可重排 EPUB 3 服务，内置简单响应式 Web UI。V1 面向带文本层、单栏、连续正文为主的图书型 PDF；不提供 OCR，也不会把缺失正文的扫描页静默转成整页图片。
+使用 Go 构建、可部署到服务器的 PDF → EPUB 3 服务，内置简单响应式 Web UI。服务可自动选择输出：正文型 PDF 转为可重排 EPUB，图片型或复杂版式 PDF 转为保留原页面的固定版式双页 EPUB。固定版式不提供 OCR；手动选择可重排时不会把缺失正文的扫描页静默转成图片。
 
 ## 快速启动
 
@@ -45,6 +45,7 @@ go run ./cmd/btc-server
 | `BTC_WORK_DIR` | `/tmp/pdf2epub` | 任务临时目录，启动时会清空其中旧任务 |
 | `BTC_EPUBCHECK_COMMAND` | `epubcheck` | EPUBCheck 可执行命令 |
 | `BTC_REQUIRE_EPUBCHECK` | `true` | 是否缺少 EPUBCheck 时拒绝成功 |
+| `BTC_FIXED_LAYOUT_DPI` | `144` | 固定版式页面渲染 DPI，允许 72–200 |
 | `BTC_R2_ACCOUNT_ID` | 空 | Cloudflare account ID；与下面三个 R2 变量同时设置才会启用 |
 | `BTC_R2_ACCESS_KEY_ID` | 空 | 仅限产物 bucket 的 R2 S3 access key ID |
 | `BTC_R2_SECRET_ACCESS_KEY` | 空 | R2 S3 secret access key，禁止提交到仓库 |
@@ -59,7 +60,7 @@ go run ./cmd/btc-server
 - `POST /api/v1/auth/login`：登录并取得 CSRF token。
 - `POST /api/v1/auth/logout`：退出。
 - `GET /api/v1/session`：恢复会话。
-- `POST /api/v1/jobs`：以 multipart 字段 `file` 上传一个 PDF。
+- `POST /api/v1/jobs`：以 multipart 字段 `file` 上传一个 PDF；`mode` 可为 `auto`、`reflowable` 或 `fixed`，默认 `auto`。
 - `GET /api/v1/jobs/{id}`：获取任务阶段与页数进度。
 - `POST /api/v1/jobs/{id}/cancel`：取消任务。
 - `GET /api/v1/jobs/{id}/download`：成功后下载 EPUB。

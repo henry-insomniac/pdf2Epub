@@ -16,7 +16,7 @@ var (
 func Rebuild(document Document) Book {
 	book := Book{
 		Title: strings.TrimSpace(document.Title), Author: strings.TrimSpace(document.Author),
-		Language: document.Language, Outline: document.Outline, Cover: document.Cover,
+		Language: document.Language, Outline: document.Outline, Cover: document.Cover, Layout: LayoutReflowable,
 	}
 	if book.Language == "" {
 		book.Language = detectLanguage(document)

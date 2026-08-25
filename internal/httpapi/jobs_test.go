@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -186,6 +187,45 @@ func TestUploadRejectsNonPDF(t *testing.T) {
 	response.Body.Close()
 }
 
+func TestUploadPassesRequestedConversionMode(t *testing.T) {
+	received := make(chan app.ConversionMode, 1)
+	converter := converterStub(func(ctx context.Context, request app.ConversionRequest, _ app.Reporter) (app.ConversionResult, error) {
+		received <- request.Mode
+		<-ctx.Done()
+		return app.ConversionResult{}, ctx.Err()
+	})
+	jobs := newTestManager(t, converter)
+	server, client := newAuthenticatedServer(t, jobs)
+	csrf := login(t, client, server.URL)
+
+	response := uploadPDFMode(t, client, server.URL, "book.pdf", []byte("%PDF-1.7\nfixture"), "fixed", csrf)
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", response.StatusCode)
+	}
+	var created domain.Snapshot
+	decodeJSON(t, response, &created)
+	if mode := <-received; mode != app.ConversionModeFixed {
+		t.Fatalf("conversion mode = %q, want fixed", mode)
+	}
+	if err := jobs.Cancel(created.ID); err != nil {
+		t.Fatalf("cancel job: %v", err)
+	}
+}
+
+func TestUploadRejectsInvalidConversionMode(t *testing.T) {
+	jobs := newTestManager(t, converterStub(func(context.Context, app.ConversionRequest, app.Reporter) (app.ConversionResult, error) {
+		return app.ConversionResult{}, errors.New("converter must not run")
+	}))
+	server, client := newAuthenticatedServer(t, jobs)
+	csrf := login(t, client, server.URL)
+
+	response := uploadPDFMode(t, client, server.URL, "book.pdf", []byte("%PDF-1.7\nfixture"), "sideways", csrf)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.StatusCode)
+	}
+}
+
 func newTestManager(t *testing.T, converter converterStub) *app.Manager {
 	t.Helper()
 	manager, err := app.NewManager(app.ManagerConfig{
@@ -228,9 +268,18 @@ func login(t *testing.T, client *http.Client, baseURL string) string {
 }
 
 func uploadPDF(t *testing.T, client *http.Client, baseURL, name string, content []byte, csrf string) *http.Response {
+	return uploadPDFMode(t, client, baseURL, name, content, "", csrf)
+}
+
+func uploadPDFMode(t *testing.T, client *http.Client, baseURL, name string, content []byte, mode, csrf string) *http.Response {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	if mode != "" {
+		if err := writer.WriteField("mode", mode); err != nil {
+			t.Fatalf("WriteField(mode): %v", err)
+		}
+	}
 	part, err := writer.CreateFormFile("file", name)
 	if err != nil {
 		t.Fatalf("CreateFormFile(): %v", err)

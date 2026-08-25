@@ -34,6 +34,7 @@ type Config struct {
 	RequireEPUBCheck     bool
 	CoverDPI             int
 	IllustrationDPI      int
+	FixedLayoutDPI       int
 	MaxIllustrationsPage int
 }
 
@@ -51,6 +52,9 @@ func New(config Config) (*Service, error) {
 	if config.IllustrationDPI == 0 {
 		config.IllustrationDPI = 110
 	}
+	if config.FixedLayoutDPI == 0 {
+		config.FixedLayoutDPI = 144
+	}
 	if config.MaxIllustrationsPage == 0 {
 		config.MaxIllustrationsPage = 12
 	}
@@ -62,20 +66,26 @@ func New(config Config) (*Service, error) {
 
 func (s *Service) Convert(ctx context.Context, request app.ConversionRequest, reporter app.Reporter) (app.ConversionResult, error) {
 	reporter.Progress(domain.StagePreflight, 0)
-	document, warnings, err := s.extract(ctx, request.SourcePath, request.SourceName, reporter)
+	extracted, err := s.extract(ctx, request.SourcePath, request.SourceName, request.Mode, reporter)
 	if err != nil {
 		return app.ConversionResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return app.ConversionResult{}, err
 	}
-	reporter.Progress(domain.StageRebuilding, len(document.Pages))
-	book := conversion.Rebuild(document)
-	for _, warning := range warnings {
+	reporter.Progress(domain.StageRebuilding, len(extracted.document.Pages)+len(extracted.pageImages))
+	var book conversion.Book
+	if extracted.layout == conversion.LayoutFixed {
+		book = conversion.FixedLayoutBook(extracted.document, extracted.pageImages)
+	} else {
+		book = conversion.Rebuild(extracted.document)
+	}
+	for _, warning := range extracted.warnings {
 		book.Warnings = append(book.Warnings, warning)
 	}
 
-	reporter.Progress(domain.StagePackaging, len(document.Pages))
+	pageCount := len(book.Sections)
+	reporter.Progress(domain.StagePackaging, pageCount)
 	outputName := epub.SafeOutputName(request.SourceName)
 	outputPath := filepath.Join(request.JobDir, outputName)
 	if err := (epub.Writer{}).Write(outputPath, book); err != nil {
@@ -86,7 +96,7 @@ func (s *Service) Convert(ctx context.Context, request app.ConversionRequest, re
 		return app.ConversionResult{}, failure("output.invalid_epub", "生成的 EPUB 结构无效，已停止提供下载。", 0, err)
 	}
 
-	reporter.Progress(domain.StageValidating, len(document.Pages))
+	reporter.Progress(domain.StageValidating, pageCount)
 	if err := s.validateEPUB(ctx, outputPath); err != nil {
 		_ = os.Remove(outputPath)
 		return app.ConversionResult{}, failure("output.epubcheck_failed", "EPUB 未通过规范校验，已停止提供下载。", 0, err)
@@ -102,10 +112,17 @@ func (s *Service) Convert(ctx context.Context, request app.ConversionRequest, re
 	return result, nil
 }
 
-func (s *Service) extract(ctx context.Context, sourcePath, sourceName string, reporter app.Reporter) (conversion.Document, []conversion.Warning, error) {
+type extractedContent struct {
+	document   conversion.Document
+	pageImages []conversion.Image
+	warnings   []conversion.Warning
+	layout     conversion.Layout
+}
+
+func (s *Service) extract(ctx context.Context, sourcePath, sourceName string, requestedMode app.ConversionMode, reporter app.Reporter) (extractedContent, error) {
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return conversion.Document{}, nil, failure("input.unreadable", "无法读取上传的 PDF。", 0, err)
+		return extractedContent{}, failure("input.unreadable", "无法读取上传的 PDF。", 0, err)
 	}
 	pool, err := webassembly.Init(webassembly.Config{
 		Context: ctx, MinIdle: 0, MaxIdle: 1, MaxTotal: 1,
@@ -113,41 +130,41 @@ func (s *Service) extract(ctx context.Context, sourcePath, sourceName string, re
 		RuntimeConfig: wazero.NewRuntimeConfig().WithCloseOnContextDone(true),
 	})
 	if err != nil {
-		return conversion.Document{}, nil, failure("engine.unavailable", "PDF 解析引擎启动失败。", 0, err)
+		return extractedContent{}, failure("engine.unavailable", "PDF 解析引擎启动失败。", 0, err)
 	}
 	defer pool.Close()
 	instance, err := pool.GetInstanceWithContext(ctx)
 	if err != nil {
-		return conversion.Document{}, nil, err
+		return extractedContent{}, err
 	}
 	defer instance.Close()
 
 	opened, err := instance.OpenDocument(&requests.OpenDocument{File: &data})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "password") {
-			return conversion.Document{}, nil, failure("input.protected_pdf", "不支持加密或需要密码的 PDF。", 0, err)
+			return extractedContent{}, failure("input.protected_pdf", "不支持加密或需要密码的 PDF。", 0, err)
 		}
-		return conversion.Document{}, nil, failure("input.invalid_pdf", "PDF 已损坏或无法解析。", 0, err)
+		return extractedContent{}, failure("input.invalid_pdf", "PDF 已损坏或无法解析。", 0, err)
 	}
 	defer instance.FPDF_CloseDocument(&requests.FPDF_CloseDocument{Document: opened.Document})
 
 	security, err := instance.FPDF_GetSecurityHandlerRevision(&requests.FPDF_GetSecurityHandlerRevision{Document: opened.Document})
 	if err != nil {
-		return conversion.Document{}, nil, failure("input.security_unknown", "无法确认 PDF 的安全限制。", 0, err)
+		return extractedContent{}, failure("input.security_unknown", "无法确认 PDF 的安全限制。", 0, err)
 	}
 	permissions, err := instance.FPDF_GetDocPermissions(&requests.FPDF_GetDocPermissions{Document: opened.Document})
 	if err != nil {
-		return conversion.Document{}, nil, failure("input.security_unknown", "无法确认 PDF 的复制和提取权限。", 0, err)
+		return extractedContent{}, failure("input.security_unknown", "无法确认 PDF 的复制和提取权限。", 0, err)
 	}
 	if security.SecurityHandlerRevision != -1 || (!permissions.CopyOrExtractText && !permissions.ExtractTextAndGraphics) {
-		return conversion.Document{}, nil, failure("input.protected_pdf", "不支持加密或禁止内容提取的 PDF。", 0, nil)
+		return extractedContent{}, failure("input.protected_pdf", "不支持加密或禁止内容提取的 PDF。", 0, nil)
 	}
 	pageCount, err := instance.FPDF_GetPageCount(&requests.FPDF_GetPageCount{Document: opened.Document})
 	if err != nil || pageCount.PageCount <= 0 {
-		return conversion.Document{}, nil, failure("input.no_pages", "PDF 没有可处理的页面。", 0, err)
+		return extractedContent{}, failure("input.no_pages", "PDF 没有可处理的页面。", 0, err)
 	}
 	if pageCount.PageCount > s.config.MaxPages {
-		return conversion.Document{}, nil, failure("input.too_many_pages", fmt.Sprintf("PDF 不能超过 %d 页。", s.config.MaxPages), 0, nil)
+		return extractedContent{}, failure("input.too_many_pages", fmt.Sprintf("PDF 不能超过 %d 页。", s.config.MaxPages), 0, nil)
 	}
 	reporter.SetTotalPages(pageCount.PageCount)
 
@@ -159,24 +176,49 @@ func (s *Service) extract(ctx context.Context, sourcePath, sourceName string, re
 	document.Outline = extractOutline(instance, opened.Document, pageCount.PageCount)
 	document.Cover, err = renderCover(instance, opened.Document, s.config.CoverDPI)
 	if err != nil {
-		return conversion.Document{}, nil, failure("input.cover_failed", "无法从 PDF 第一页生成封面。", 1, err)
+		return extractedContent{}, failure("input.cover_failed", "无法从 PDF 第一页生成封面。", 1, err)
+	}
+	layout, err := s.selectLayout(instance, opened.Document, pageCount.PageCount, requestedMode)
+	if err != nil {
+		return extractedContent{}, err
+	}
+	if layout == conversion.LayoutFixed {
+		result := extractedContent{document: document, layout: layout}
+		if requestedMode == app.ConversionModeAuto || requestedMode == "" {
+			result.warnings = append(result.warnings, conversion.Warning{Code: "layout.fixed_auto_selected", Message: "检测到正文主要位于页面图片中，已自动生成固定版式双页 EPUB。"})
+		} else {
+			result.warnings = append(result.warnings, conversion.Warning{Code: "layout.fixed_selected", Message: "已生成固定版式双页 EPUB；页面排版会保留，但文字不能自由重排。"})
+		}
+		for pageIndex := 0; pageIndex < pageCount.PageCount; pageIndex++ {
+			if err := ctx.Err(); err != nil {
+				return extractedContent{}, err
+			}
+			reporter.Progress(domain.StageExtracting, pageIndex)
+			pageImage, renderErr := renderFixedPage(instance, opened.Document, pageIndex, s.config.FixedLayoutDPI)
+			if renderErr != nil {
+				return extractedContent{}, failure("input.page_render_failed", "无法完整渲染固定版式页面。", pageIndex+1, renderErr)
+			}
+			result.pageImages = append(result.pageImages, pageImage)
+			reporter.Progress(domain.StageExtracting, pageIndex+1)
+		}
+		return result, nil
 	}
 
 	var warnings []conversion.Warning
 	for pageIndex := 0; pageIndex < pageCount.PageCount; pageIndex++ {
 		if err := ctx.Err(); err != nil {
-			return conversion.Document{}, nil, err
+			return extractedContent{}, err
 		}
 		reporter.Progress(domain.StageExtracting, pageIndex)
 		page, pageWarnings, err := s.extractPage(instance, opened.Document, pageIndex)
 		if err != nil {
-			return conversion.Document{}, nil, err
+			return extractedContent{}, err
 		}
 		document.Pages = append(document.Pages, page)
 		warnings = append(warnings, pageWarnings...)
 		reporter.Progress(domain.StageExtracting, pageIndex+1)
 	}
-	return document, warnings, nil
+	return extractedContent{document: document, warnings: warnings, layout: conversion.LayoutReflowable}, nil
 }
 
 func (s *Service) extractPage(instance pdfium.Pdfium, documentRef references.FPDF_DOCUMENT, pageIndex int) (conversion.Page, []conversion.Warning, error) {
@@ -305,7 +347,122 @@ func renderCover(instance pdfium.Pdfium, document references.FPDF_DOCUMENT, dpi 
 	if err := jpeg.Encode(&buffer, response.Result.RenderedImage, &jpeg.Options{Quality: 86}); err != nil {
 		return conversion.Image{}, err
 	}
-	return conversion.Image{Name: "cover.jpg", MediaType: "image/jpeg", Data: buffer.Bytes()}, nil
+	bounds := response.Result.RenderedImage.Bounds()
+	return conversion.Image{Name: "cover.jpg", MediaType: "image/jpeg", Data: buffer.Bytes(), Width: bounds.Dx(), Height: bounds.Dy()}, nil
+}
+
+type pageLayoutProbe struct {
+	textFingerprint      string
+	largestImageCoverage float64
+}
+
+func (s *Service) selectLayout(instance pdfium.Pdfium, document references.FPDF_DOCUMENT, pageCount int, requestedMode app.ConversionMode) (conversion.Layout, error) {
+	mode, err := app.ParseConversionMode(string(requestedMode))
+	if err != nil {
+		return "", failure("input.invalid_conversion_mode", "转换模式无效，请重新选择。", 0, err)
+	}
+	if mode == app.ConversionModeFixed {
+		return conversion.LayoutFixed, nil
+	}
+	probes := make([]pageLayoutProbe, 0, 8)
+	for _, pageIndex := range samplePageIndexes(pageCount, 8) {
+		page := requests.Page{ByIndex: &requests.PageByIndex{Document: document, Index: pageIndex}}
+		plain, textErr := instance.GetPageText(&requests.GetPageText{Page: page})
+		if textErr != nil {
+			return "", failure("input.layout_detection_failed", "无法判断 PDF 的适合版式。", pageIndex+1, textErr)
+		}
+		size, sizeErr := instance.GetPageSize(&requests.GetPageSize{Page: page})
+		if sizeErr != nil {
+			return "", failure("input.layout_detection_failed", "无法判断 PDF 的适合版式。", pageIndex+1, sizeErr)
+		}
+		regions, regionErr := imageRegions(instance, page, size.Width, size.Height, s.config.MaxIllustrationsPage)
+		if regionErr != nil {
+			return "", failure("input.layout_detection_failed", "无法判断 PDF 的适合版式。", pageIndex+1, regionErr)
+		}
+		probes = append(probes, pageLayoutProbe{
+			textFingerprint:      comparableLine(plain.Text),
+			largestImageCoverage: largestCoverage(regions),
+		})
+	}
+	imageBased := shouldUseFixedLayout(probes)
+	if mode == app.ConversionModeReflowable {
+		if imageBased {
+			return "", failure("input.image_based_pdf", "PDF 正文主要位于页面图片中，无法可靠生成可重排 EPUB；请选择固定版式。", 0, nil)
+		}
+		return conversion.LayoutReflowable, nil
+	}
+	if imageBased {
+		return conversion.LayoutFixed, nil
+	}
+	return conversion.LayoutReflowable, nil
+}
+
+func samplePageIndexes(pageCount, limit int) []int {
+	if pageCount <= 0 || limit <= 0 {
+		return nil
+	}
+	if pageCount <= limit {
+		indexes := make([]int, pageCount)
+		for index := range indexes {
+			indexes[index] = index
+		}
+		return indexes
+	}
+	indexes := make([]int, limit)
+	for index := range indexes {
+		indexes[index] = index * (pageCount - 1) / (limit - 1)
+	}
+	return indexes
+}
+
+func shouldUseFixedLayout(probes []pageLayoutProbe) bool {
+	if len(probes) == 0 {
+		return false
+	}
+	dominantImages := 0
+	emptyText := 0
+	fingerprints := make(map[string]int)
+	maxRepeated := 0
+	for _, probe := range probes {
+		if probe.largestImageCoverage >= 0.55 {
+			dominantImages++
+		}
+		if probe.textFingerprint == "" {
+			emptyText++
+			continue
+		}
+		fingerprints[probe.textFingerprint]++
+		if fingerprints[probe.textFingerprint] > maxRepeated {
+			maxRepeated = fingerprints[probe.textFingerprint]
+		}
+	}
+	imageDominated := dominantImages*5 >= len(probes)*3
+	mostlyEmpty := emptyText*2 >= len(probes)
+	repeatedOverlay := len(probes) >= 2 && maxRepeated*5 >= len(probes)*4
+	return imageDominated && (mostlyEmpty || repeatedOverlay)
+}
+
+func renderFixedPage(instance pdfium.Pdfium, document references.FPDF_DOCUMENT, pageIndex, dpi int) (conversion.Image, error) {
+	response, err := instance.RenderPageInDPI(&requests.RenderPageInDPI{
+		Page: requests.Page{ByIndex: &requests.PageByIndex{Document: document, Index: pageIndex}},
+		DPI:  dpi,
+	})
+	if err != nil {
+		return conversion.Image{}, err
+	}
+	defer response.Cleanup()
+	var buffer bytes.Buffer
+	if err := jpeg.Encode(&buffer, response.Result.RenderedImage, &jpeg.Options{Quality: 88}); err != nil {
+		return conversion.Image{}, err
+	}
+	bounds := response.Result.RenderedImage.Bounds()
+	return conversion.Image{
+		Name:      fmt.Sprintf("page-%04d.jpg", pageIndex+1),
+		MediaType: "image/jpeg",
+		Data:      buffer.Bytes(),
+		Width:     bounds.Dx(),
+		Height:    bounds.Dy(),
+	}, nil
 }
 
 type imageRegion struct {

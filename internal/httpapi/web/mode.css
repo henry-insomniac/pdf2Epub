@@ -1,0 +1,78 @@
+.mode-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 24px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.mode-picker legend {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.mode-picker label {
+  position: relative;
+  display: block;
+  min-height: 92px;
+  padding: 17px 18px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: border-color .18s ease, background .18s ease, transform .18s ease;
+}
+
+.mode-picker label:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.mode-picker label:has(input:checked) {
+  border-color: var(--accent);
+  background: rgba(49, 92, 80, .07);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.mode-picker input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+
+.mode-picker span,
+.mode-picker strong,
+.mode-picker small {
+  display: block;
+}
+
+.mode-picker strong {
+  margin-bottom: 7px;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.mode-picker small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+@media (max-width: 760px) {
+  .mode-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .mode-picker label {
+    min-height: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-picker label {
+    transition: none;
+  }
+}
