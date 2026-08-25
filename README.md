@@ -12,7 +12,7 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-浏览器打开 `http://服务器地址:8080`。服务默认在容器内监听 `0.0.0.0:8080`，不是只监听 `127.0.0.1`。
+服务默认在容器内监听 `0.0.0.0:8080`，但 Compose 出于安全考虑只将其发布到宿主机 `127.0.0.1:8080`，供同机 Nginx/Caddy 反向代理。若明确需要直接暴露测试端口，可将 `BTC_BIND_IP=0.0.0.0`。
 
 公网部署应放在 Caddy、Nginx 或其他 HTTPS 反向代理后，并将 `BTC_SECURE_COOKIE=true`。账号凭据也可通过 `BTC_USERNAME_FILE`、`BTC_PASSWORD_FILE`、`BTC_SESSION_SECRET_FILE` 指向 Docker Secret 文件，避免直接放入环境变量。
 
