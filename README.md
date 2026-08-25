@@ -16,6 +16,8 @@ docker compose up --build -d
 
 公网部署应放在 Caddy、Nginx 或其他 HTTPS 反向代理后，并将 `BTC_SECURE_COOKIE=true`。账号凭据也可通过 `BTC_USERNAME_FILE`、`BTC_PASSWORD_FILE`、`BTC_SESSION_SECRET_FILE` 指向 Docker Secret 文件，避免直接放入环境变量。
 
+生产环境推荐配置 Cloudflare R2 交付成功产物。服务会在转换完成后将 EPUB 上传到私有 bucket；已登录用户点击下载时，API 返回短期签名地址，文件流不再经过应用服务器。R2 不可用时会保留本地产物作为降级，并在任务警告和服务日志中说明。
+
 ## 本地开发
 
 需要 Go 1.26.7 和 EPUBCheck 5.x。若只是调试解析与 UI，可以暂时跳过外部 EPUBCheck；生产环境和 Docker 镜像始终强制校验。
@@ -43,8 +45,14 @@ go run ./cmd/btc-server
 | `BTC_WORK_DIR` | `/tmp/pdf2epub` | 任务临时目录，启动时会清空其中旧任务 |
 | `BTC_EPUBCHECK_COMMAND` | `epubcheck` | EPUBCheck 可执行命令 |
 | `BTC_REQUIRE_EPUBCHECK` | `true` | 是否缺少 EPUBCheck 时拒绝成功 |
+| `BTC_R2_ACCOUNT_ID` | 空 | Cloudflare account ID；与下面三个 R2 变量同时设置才会启用 |
+| `BTC_R2_ACCESS_KEY_ID` | 空 | 仅限产物 bucket 的 R2 S3 access key ID |
+| `BTC_R2_SECRET_ACCESS_KEY` | 空 | R2 S3 secret access key，禁止提交到仓库 |
+| `BTC_R2_BUCKET` | 空 | 私有 R2 bucket 名称 |
+| `BTC_R2_PREFIX` | `epub` | R2 对象 key 前缀 |
+| `BTC_DOWNLOAD_URL_TTL` | `15m` | 登录校验后生成的 R2 签名下载地址有效期 |
 
-固定限制：单文件 100 MiB、1000 页、单并发、任务超时 30 分钟、终态与成功产物保留 1 小时。
+固定限制：单文件 100 MiB、1000 页、单并发、任务超时 30 分钟、终态与成功产物保留 1 小时。R2 凭据应只授予目标 bucket 的对象读写权限；bucket 保持私有，签名 URL 视为临时 bearer token。
 
 ## API
 

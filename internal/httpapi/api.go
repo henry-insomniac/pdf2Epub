@@ -15,7 +15,6 @@ import (
 
 	"pdf2epub/internal/app"
 	"pdf2epub/internal/auth"
-	"pdf2epub/internal/domain"
 )
 
 const sessionCookieName = "btc_session"
@@ -211,16 +210,25 @@ func (a *API) handleDownload(w http.ResponseWriter, r *http.Request, _ auth.Sess
 		writeError(w, http.StatusServiceUnavailable, "service.conversion_unavailable", "转换服务尚未就绪，请稍后重试。")
 		return
 	}
-	snapshot, ok := a.jobs.Get(r.PathValue("id"))
-	if !ok {
+	download, err := a.jobs.Download(r.Context(), r.PathValue("id"))
+	if errors.Is(err, app.ErrJobNotFound) {
 		writeError(w, http.StatusNotFound, "job.not_found", "转换任务不存在或已过期。")
 		return
 	}
-	if snapshot.Status != domain.JobSucceeded || snapshot.Artifact == nil {
+	if errors.Is(err, app.ErrArtifactUnavailable) {
 		writeError(w, http.StatusConflict, "job.artifact_unavailable", "EPUB 尚不可下载，请等待转换成功。")
 		return
 	}
-	file, err := os.Open(snapshot.Artifact.Path)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "job.download_unavailable", "暂时无法建立下载链接，请稍后重试。")
+		return
+	}
+	if download.URL != "" {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, download.URL, http.StatusFound)
+		return
+	}
+	file, err := os.Open(download.Artifact.Path)
 	if err != nil {
 		writeError(w, http.StatusGone, "job.artifact_expired", "EPUB 已被清理，请重新转换。")
 		return
@@ -231,10 +239,10 @@ func (a *API) handleDownload(w http.ResponseWriter, r *http.Request, _ auth.Sess
 		writeError(w, http.StatusInternalServerError, "job.artifact_unreadable", "无法读取 EPUB，请重新转换。")
 		return
 	}
-	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(snapshot.Artifact.Name)})
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(download.Artifact.Name)})
 	w.Header().Set("Content-Disposition", disposition)
 	w.Header().Set("Content-Type", "application/epub+zip")
-	http.ServeContent(w, r, snapshot.Artifact.Name, info.ModTime(), file)
+	http.ServeContent(w, r, download.Artifact.Name, info.ModTime(), file)
 }
 
 type sessionHandler func(http.ResponseWriter, *http.Request, auth.Session)

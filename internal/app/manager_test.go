@@ -67,6 +67,90 @@ func TestManagerRunsOneJobAndRetainsArtifact(t *testing.T) {
 	}
 }
 
+func TestManagerPublishesArtifactAndReturnsSignedDownload(t *testing.T) {
+	root := t.TempDir()
+	store := &artifactStoreStub{downloadURL: "https://objects.example/download.epub?signature=test"}
+	manager, err := NewManager(ManagerConfig{
+		WorkDir:        root,
+		MaxUploadBytes: 1024,
+		JobTimeout:     time.Second,
+		Retention:      time.Hour,
+		DownloadURLTTL: 10 * time.Minute,
+		ArtifactStore:  store,
+	}, converterFunc(func(_ context.Context, request ConversionRequest, _ Reporter) (ConversionResult, error) {
+		artifactPath := filepath.Join(request.JobDir, "中文书名.epub")
+		if err := os.WriteFile(artifactPath, []byte("epub"), 0o600); err != nil {
+			return ConversionResult{}, err
+		}
+		return ConversionResult{Artifact: domain.Artifact{Name: "中文书名.epub", Path: artifactPath, Size: 4}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewManager(): %v", err)
+	}
+	t.Cleanup(manager.Close)
+
+	job, err := manager.Submit("中文书名.pdf", bytes.NewBufferString("%PDF test"))
+	if err != nil {
+		t.Fatalf("Submit(): %v", err)
+	}
+	finished := waitForTerminal(t, manager, job.ID)
+	if finished.Status != domain.JobSucceeded || finished.Artifact == nil {
+		t.Fatalf("snapshot = %#v", finished)
+	}
+	if finished.Artifact.StorageKey != "epub/"+job.ID+".epub" || finished.Artifact.Path != "" {
+		t.Fatalf("artifact = %#v", finished.Artifact)
+	}
+	if _, err := os.Stat(filepath.Join(root, job.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remote job directory still exists or unexpected error: %v", err)
+	}
+	download, err := manager.Download(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("Download(): %v", err)
+	}
+	if download.URL != store.downloadURL || download.Artifact.Name != "中文书名.epub" {
+		t.Fatalf("download = %#v", download)
+	}
+	if store.lastTTL != 10*time.Minute {
+		t.Fatalf("signed URL TTL = %s", store.lastTTL)
+	}
+}
+
+func TestManagerFallsBackToLocalDownloadWhenPublishFails(t *testing.T) {
+	manager, err := NewManager(ManagerConfig{
+		WorkDir:        t.TempDir(),
+		MaxUploadBytes: 1024,
+		JobTimeout:     time.Second,
+		Retention:      time.Hour,
+		ArtifactStore:  &artifactStoreStub{publishErr: errors.New("R2 unavailable")},
+	}, converterFunc(func(_ context.Context, request ConversionRequest, _ Reporter) (ConversionResult, error) {
+		artifactPath := filepath.Join(request.JobDir, "book.epub")
+		if err := os.WriteFile(artifactPath, []byte("epub"), 0o600); err != nil {
+			return ConversionResult{}, err
+		}
+		return ConversionResult{Artifact: domain.Artifact{Name: "book.epub", Path: artifactPath, Size: 4}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewManager(): %v", err)
+	}
+	t.Cleanup(manager.Close)
+
+	job, err := manager.Submit("book.pdf", bytes.NewBufferString("%PDF test"))
+	if err != nil {
+		t.Fatalf("Submit(): %v", err)
+	}
+	finished := waitForTerminal(t, manager, job.ID)
+	if finished.Status != domain.JobSucceeded || finished.Artifact == nil || finished.Artifact.Path == "" {
+		t.Fatalf("snapshot = %#v", finished)
+	}
+	if len(finished.Warnings) != 1 || finished.Warnings[0].Code != "delivery.object_store_fallback" {
+		t.Fatalf("warnings = %#v", finished.Warnings)
+	}
+	download, err := manager.Download(context.Background(), job.ID)
+	if err != nil || download.URL != "" {
+		t.Fatalf("Download() = %#v, %v", download, err)
+	}
+}
+
 func TestManagerCancelsAndReleasesSlot(t *testing.T) {
 	root := t.TempDir()
 	started := make(chan struct{})
@@ -170,4 +254,26 @@ type converterFunc func(context.Context, ConversionRequest, Reporter) (Conversio
 
 func (fn converterFunc) Convert(ctx context.Context, request ConversionRequest, reporter Reporter) (ConversionResult, error) {
 	return fn(ctx, request, reporter)
+}
+
+type artifactStoreStub struct {
+	publishErr  error
+	downloadURL string
+	lastTTL     time.Duration
+}
+
+func (s *artifactStoreStub) Publish(_ context.Context, jobID string, _ domain.Artifact) (string, error) {
+	if s.publishErr != nil {
+		return "", s.publishErr
+	}
+	return "epub/" + jobID + ".epub", nil
+}
+
+func (s *artifactStoreStub) SignedDownloadURL(_ context.Context, _ domain.Artifact, ttl time.Duration) (string, error) {
+	s.lastTTL = ttl
+	return s.downloadURL, nil
+}
+
+func (s *artifactStoreStub) Delete(context.Context, string) error {
+	return nil
 }

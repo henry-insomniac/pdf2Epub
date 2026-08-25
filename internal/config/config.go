@@ -2,8 +2,10 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,6 +24,13 @@ type Config struct {
 	SessionTTL       time.Duration
 	EPUBCheckCommand string
 	RequireEPUBCheck bool
+	R2Enabled        bool
+	R2AccountID      string
+	R2AccessKeyID    string
+	R2SecretKey      string
+	R2Bucket         string
+	R2Prefix         string
+	DownloadURLTTL   time.Duration
 }
 
 func Load() (Config, error) {
@@ -40,12 +49,35 @@ func Load() (Config, error) {
 		SessionTTL:       12 * time.Hour,
 		EPUBCheckCommand: envOrDefault("BTC_EPUBCHECK_COMMAND", "epubcheck"),
 		RequireEPUBCheck: envBool("BTC_REQUIRE_EPUBCHECK", true),
+		R2AccountID:      strings.TrimSpace(secretValue("BTC_R2_ACCOUNT_ID")),
+		R2AccessKeyID:    strings.TrimSpace(secretValue("BTC_R2_ACCESS_KEY_ID")),
+		R2SecretKey:      secretValue("BTC_R2_SECRET_ACCESS_KEY"),
+		R2Bucket:         strings.TrimSpace(envOrDefault("BTC_R2_BUCKET", "")),
+		R2Prefix:         strings.Trim(strings.TrimSpace(envOrDefault("BTC_R2_PREFIX", "epub")), "/"),
+		DownloadURLTTL:   15 * time.Minute,
 	}
 	if cfg.Username == "" || cfg.Password == "" {
 		return Config{}, errors.New("BTC_USERNAME and BTC_PASSWORD are required")
 	}
 	if len(cfg.SessionSecret) < 32 {
 		return Config{}, errors.New("BTC_SESSION_SECRET must contain at least 32 bytes")
+	}
+	configuredR2Values := 0
+	for _, value := range []string{cfg.R2AccountID, cfg.R2AccessKeyID, cfg.R2SecretKey, cfg.R2Bucket} {
+		if value != "" {
+			configuredR2Values++
+		}
+	}
+	if configuredR2Values != 0 && configuredR2Values != 4 {
+		return Config{}, errors.New("BTC_R2_ACCOUNT_ID, BTC_R2_ACCESS_KEY_ID, BTC_R2_SECRET_ACCESS_KEY and BTC_R2_BUCKET must be configured together")
+	}
+	cfg.R2Enabled = configuredR2Values == 4
+	if value := strings.TrimSpace(os.Getenv("BTC_DOWNLOAD_URL_TTL")); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration <= 0 {
+			return Config{}, fmt.Errorf("BTC_DOWNLOAD_URL_TTL must be a positive duration: %q", value)
+		}
+		cfg.DownloadURLTTL = duration
 	}
 	return cfg, nil
 }

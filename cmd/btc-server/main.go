@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"pdf2epub/internal/app"
+	"pdf2epub/internal/artifactstore"
 	"pdf2epub/internal/auth"
 	"pdf2epub/internal/config"
 	"pdf2epub/internal/converter"
@@ -35,9 +36,25 @@ func main() {
 		logger.Error("initialize converter", "error", err)
 		os.Exit(1)
 	}
+	var store app.ArtifactStore
+	if cfg.R2Enabled {
+		store, err = artifactstore.NewR2(artifactstore.Config{
+			Endpoint:        "https://" + cfg.R2AccountID + ".r2.cloudflarestorage.com",
+			AccessKeyID:     cfg.R2AccessKeyID,
+			SecretAccessKey: cfg.R2SecretKey,
+			Bucket:          cfg.R2Bucket,
+			Prefix:          cfg.R2Prefix,
+		})
+		if err != nil {
+			logger.Error("initialize R2 artifact store", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("R2 artifact delivery enabled", "bucket", cfg.R2Bucket, "prefix", cfg.R2Prefix)
+	}
 	jobs, err := app.NewManager(app.ManagerConfig{
 		WorkDir: cfg.WorkDir, MaxUploadBytes: cfg.MaxUploadBytes,
 		JobTimeout: cfg.JobTimeout, Retention: cfg.Retention,
+		DownloadURLTTL: cfg.DownloadURLTTL, ArtifactStore: store,
 	}, conversionService)
 	if err != nil {
 		logger.Error("initialize job manager", "error", err)

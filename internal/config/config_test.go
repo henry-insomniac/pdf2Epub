@@ -44,6 +44,12 @@ func TestLoadDefaults(t *testing.T) {
 	if !got.SecureCookie {
 		t.Fatal("SecureCookie = false, want true")
 	}
+	if got.R2Enabled {
+		t.Fatal("R2Enabled = true, want false")
+	}
+	if got.DownloadURLTTL != 15*time.Minute {
+		t.Fatalf("DownloadURLTTL = %s", got.DownloadURLTTL)
+	}
 }
 
 func TestLoadRejectsShortSessionSecret(t *testing.T) {
@@ -53,5 +59,38 @@ func TestLoadRejectsShortSessionSecret(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want short secret error")
+	}
+}
+
+func TestLoadEnablesCompleteR2Configuration(t *testing.T) {
+	t.Setenv("BTC_USERNAME", "admin")
+	t.Setenv("BTC_PASSWORD", "correct horse battery staple")
+	t.Setenv("BTC_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("BTC_R2_ACCOUNT_ID", "account-id")
+	t.Setenv("BTC_R2_ACCESS_KEY_ID", "access-key")
+	t.Setenv("BTC_R2_SECRET_ACCESS_KEY", "secret-key")
+	t.Setenv("BTC_R2_BUCKET", "pdf2epub")
+	t.Setenv("BTC_DOWNLOAD_URL_TTL", "10m")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if !got.R2Enabled || got.R2Bucket != "pdf2epub" {
+		t.Fatalf("R2 config = %#v", got)
+	}
+	if got.DownloadURLTTL != 10*time.Minute {
+		t.Fatalf("DownloadURLTTL = %s", got.DownloadURLTTL)
+	}
+}
+
+func TestLoadRejectsPartialR2Configuration(t *testing.T) {
+	t.Setenv("BTC_USERNAME", "admin")
+	t.Setenv("BTC_PASSWORD", "correct horse battery staple")
+	t.Setenv("BTC_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("BTC_R2_BUCKET", "pdf2epub")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want partial R2 configuration error")
 	}
 }

@@ -18,17 +18,21 @@ import (
 )
 
 var (
-	ErrBusy           = errors.New("a conversion job is already active")
-	ErrJobNotFound    = errors.New("job not found")
-	ErrNotCancelable  = errors.New("job cannot be canceled")
-	ErrUploadTooLarge = errors.New("upload exceeds configured limit")
+	ErrBusy                = errors.New("a conversion job is already active")
+	ErrJobNotFound         = errors.New("job not found")
+	ErrNotCancelable       = errors.New("job cannot be canceled")
+	ErrUploadTooLarge      = errors.New("upload exceeds configured limit")
+	ErrArtifactUnavailable = errors.New("artifact is not available")
 )
 
 type ManagerConfig struct {
-	WorkDir        string
-	MaxUploadBytes int64
-	JobTimeout     time.Duration
-	Retention      time.Duration
+	WorkDir           string
+	MaxUploadBytes    int64
+	JobTimeout        time.Duration
+	Retention         time.Duration
+	DownloadURLTTL    time.Duration
+	ArtifactStore     ArtifactStore
+	StoreCleanupLimit time.Duration
 }
 
 type ConversionRequest struct {
@@ -49,6 +53,17 @@ type Reporter interface {
 
 type Converter interface {
 	Convert(context.Context, ConversionRequest, Reporter) (ConversionResult, error)
+}
+
+type ArtifactStore interface {
+	Publish(context.Context, string, domain.Artifact) (string, error)
+	SignedDownloadURL(context.Context, domain.Artifact, time.Duration) (string, error)
+	Delete(context.Context, string) error
+}
+
+type ArtifactDownload struct {
+	Artifact domain.Artifact
+	URL      string
 }
 
 type ConversionFailure struct {
@@ -88,6 +103,12 @@ func NewManager(config ManagerConfig, converter Converter) (*Manager, error) {
 	config.WorkDir = cleanWorkDir
 	if config.MaxUploadBytes <= 0 || config.JobTimeout <= 0 || config.Retention <= 0 {
 		return nil, errors.New("manager limits must be positive")
+	}
+	if config.DownloadURLTTL <= 0 {
+		config.DownloadURLTTL = 15 * time.Minute
+	}
+	if config.StoreCleanupLimit <= 0 {
+		config.StoreCleanupLimit = 15 * time.Second
 	}
 	if converter == nil {
 		return nil, errors.New("converter is required")
@@ -189,15 +210,27 @@ func (m *Manager) Cancel(id string) error {
 	return nil
 }
 
-func (m *Manager) ArtifactPath(id string) (string, error) {
+func (m *Manager) Download(ctx context.Context, id string) (ArtifactDownload, error) {
 	snapshot, ok := m.Get(id)
 	if !ok {
-		return "", ErrJobNotFound
+		return ArtifactDownload{}, ErrJobNotFound
 	}
 	if snapshot.Status != domain.JobSucceeded || snapshot.Artifact == nil {
-		return "", errors.New("artifact is not available")
+		return ArtifactDownload{}, ErrArtifactUnavailable
 	}
-	return snapshot.Artifact.Path, nil
+	download := ArtifactDownload{Artifact: *snapshot.Artifact}
+	if snapshot.Artifact.StorageKey == "" {
+		return download, nil
+	}
+	if m.config.ArtifactStore == nil {
+		return ArtifactDownload{}, errors.New("artifact store is not configured")
+	}
+	url, err := m.config.ArtifactStore.SignedDownloadURL(ctx, *snapshot.Artifact, m.config.DownloadURLTTL)
+	if err != nil {
+		return ArtifactDownload{}, fmt.Errorf("sign artifact download: %w", err)
+	}
+	download.URL = url
+	return download, nil
 }
 
 func (m *Manager) Close() {
@@ -214,6 +247,7 @@ func (m *Manager) Close() {
 	}
 	m.mu.Unlock()
 	m.wg.Wait()
+	m.cleanupStoredArtifacts()
 	_ = os.RemoveAll(m.config.WorkDir)
 }
 
@@ -253,7 +287,22 @@ func (m *Manager) run(ctx context.Context, managed *managedJob) {
 	for _, warning := range result.Warnings {
 		managed.job.AddWarning(warning)
 	}
+	if m.config.ArtifactStore != nil {
+		storageKey, publishErr := m.config.ArtifactStore.Publish(ctx, managed.job.Snapshot().ID, result.Artifact)
+		if publishErr != nil {
+			slog.Error("publish artifact to object storage failed", "job_id", managed.job.Snapshot().ID, "error", publishErr)
+			managed.job.AddWarning(domain.Warning{
+				Code:    "delivery.object_store_fallback",
+				Message: "云端下载暂时不可用，本次使用源站下载。",
+			})
+		} else {
+			result.Artifact.StorageKey = storageKey
+			result.Artifact.Path = ""
+			_ = os.RemoveAll(managed.jobDir)
+		}
+	}
 	if err := managed.job.Succeed(result.Artifact); err != nil {
+		m.deleteStoredArtifact(result.Artifact)
 		_ = os.RemoveAll(managed.jobDir)
 		m.finish(managed)
 		return
@@ -271,11 +320,44 @@ func (m *Manager) finish(managed *managedJob) {
 	m.mu.Unlock()
 	close(managed.done)
 	time.AfterFunc(m.config.Retention, func() {
+		snapshot := managed.job.Snapshot()
+		if snapshot.Artifact != nil {
+			m.deleteStoredArtifact(*snapshot.Artifact)
+		}
 		_ = os.RemoveAll(managed.jobDir)
 		m.mu.Lock()
 		delete(m.jobs, id)
 		m.mu.Unlock()
 	})
+}
+
+func (m *Manager) cleanupStoredArtifacts() {
+	if m.config.ArtifactStore == nil {
+		return
+	}
+	m.mu.RLock()
+	artifacts := make([]domain.Artifact, 0, len(m.jobs))
+	for _, managed := range m.jobs {
+		snapshot := managed.job.Snapshot()
+		if snapshot.Artifact != nil && snapshot.Artifact.StorageKey != "" {
+			artifacts = append(artifacts, *snapshot.Artifact)
+		}
+	}
+	m.mu.RUnlock()
+	for _, artifact := range artifacts {
+		m.deleteStoredArtifact(artifact)
+	}
+}
+
+func (m *Manager) deleteStoredArtifact(artifact domain.Artifact) {
+	if m.config.ArtifactStore == nil || artifact.StorageKey == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.config.StoreCleanupLimit)
+	defer cancel()
+	if err := m.config.ArtifactStore.Delete(ctx, artifact.StorageKey); err != nil {
+		slog.Error("delete artifact from object storage failed", "storage_key", artifact.StorageKey, "error", err)
+	}
 }
 
 type jobReporter struct {

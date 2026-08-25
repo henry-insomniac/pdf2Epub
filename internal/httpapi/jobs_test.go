@@ -123,6 +123,55 @@ func TestSuccessfulJobCanBeDownloaded(t *testing.T) {
 	}
 }
 
+func TestSuccessfulRemoteJobRedirectsToSignedDownload(t *testing.T) {
+	converter := converterStub(func(_ context.Context, request app.ConversionRequest, _ app.Reporter) (app.ConversionResult, error) {
+		path := filepath.Join(request.JobDir, "book.epub")
+		if err := os.WriteFile(path, []byte("epub fixture"), 0o600); err != nil {
+			return app.ConversionResult{}, err
+		}
+		return app.ConversionResult{Artifact: domain.Artifact{Name: "book.epub", Path: path, Size: 12}}, nil
+	})
+	jobs, err := app.NewManager(app.ManagerConfig{
+		WorkDir:        t.TempDir(),
+		MaxUploadBytes: 1024,
+		JobTimeout:     time.Second,
+		Retention:      time.Hour,
+		ArtifactStore:  remoteStoreStub{},
+	}, converter)
+	if err != nil {
+		t.Fatalf("app.NewManager(): %v", err)
+	}
+	t.Cleanup(jobs.Close)
+	server, client := newAuthenticatedServer(t, jobs)
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	csrf := login(t, client, server.URL)
+
+	response := uploadPDF(t, client, server.URL, "book.pdf", []byte("%PDF-1.7\nfixture"), csrf)
+	var created domain.Snapshot
+	decodeJSON(t, response, &created)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		response = doJSON(t, client, http.MethodGet, server.URL+"/api/v1/jobs/"+created.ID, nil, "")
+		var snapshot domain.Snapshot
+		decodeJSON(t, response, &snapshot)
+		if snapshot.Status == domain.JobSucceeded {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	response = doJSON(t, client, http.MethodGet, server.URL+"/api/v1/jobs/"+created.ID+"/download", nil, "")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusFound {
+		t.Fatalf("download status = %d, want 302", response.StatusCode)
+	}
+	if response.Header.Get("Location") != "https://objects.example/book.epub?signature=test" {
+		t.Fatalf("Location = %q", response.Header.Get("Location"))
+	}
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q", response.Header.Get("Cache-Control"))
+	}
+}
+
 func TestUploadRejectsNonPDF(t *testing.T) {
 	jobs := newTestManager(t, converterStub(func(context.Context, app.ConversionRequest, app.Reporter) (app.ConversionResult, error) {
 		return app.ConversionResult{}, nil
@@ -211,4 +260,18 @@ type converterStub func(context.Context, app.ConversionRequest, app.Reporter) (a
 
 func (fn converterStub) Convert(ctx context.Context, request app.ConversionRequest, reporter app.Reporter) (app.ConversionResult, error) {
 	return fn(ctx, request, reporter)
+}
+
+type remoteStoreStub struct{}
+
+func (remoteStoreStub) Publish(_ context.Context, jobID string, _ domain.Artifact) (string, error) {
+	return "epub/" + jobID + ".epub", nil
+}
+
+func (remoteStoreStub) SignedDownloadURL(context.Context, domain.Artifact, time.Duration) (string, error) {
+	return "https://objects.example/book.epub?signature=test", nil
+}
+
+func (remoteStoreStub) Delete(context.Context, string) error {
+	return nil
 }

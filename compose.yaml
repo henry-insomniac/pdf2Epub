@@ -9,6 +9,12 @@ services:
       BTC_PASSWORD: "${BTC_PASSWORD:?set BTC_PASSWORD}"
       BTC_SESSION_SECRET: "${BTC_SESSION_SECRET:?set a random secret of at least 32 bytes}"
       BTC_SECURE_COOKIE: "${BTC_SECURE_COOKIE:-false}"
+      BTC_R2_ACCOUNT_ID: "${BTC_R2_ACCOUNT_ID:-}"
+      BTC_R2_ACCESS_KEY_ID: "${BTC_R2_ACCESS_KEY_ID:-}"
+      BTC_R2_SECRET_ACCESS_KEY: "${BTC_R2_SECRET_ACCESS_KEY:-}"
+      BTC_R2_BUCKET: "${BTC_R2_BUCKET:-}"
+      BTC_R2_PREFIX: "${BTC_R2_PREFIX:-epub}"
+      BTC_DOWNLOAD_URL_TTL: "${BTC_DOWNLOAD_URL_TTL:-15m}"
     volumes:
       - pdf2epub-work:/var/lib/pdf2epub
     security_opt:

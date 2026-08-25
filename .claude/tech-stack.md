@@ -25,6 +25,7 @@
 - PDF 引擎：`go-pdfium` WebAssembly 模式，禁止默认挂载整个容器文件系统。
 - EPUB 生成：Go 代码生成 EPUB 3 包。
 - EPUB 校验：W3C EPUBCheck 命令行工具和最小 Java 运行时，由 Docker 镜像封装。
+- 产物交付：可选 Cloudflare R2 私有 bucket，通过 AWS SDK for Go v2 的 S3 兼容 API 上传、生成短期签名 URL 并清理对象。
 - 构建必须固定 PDFium、`go-pdfium`、EPUBCheck 和 Java 运行时版本，并输出第三方许可证清单。
 
 - 依赖管理：Go Modules，`go.mod` 固定直接依赖版本。
@@ -52,6 +53,7 @@
 - 不提交 `.env`、密钥、令牌、Cookie、账号凭据。
 - 示例配置使用 `.env.example` 或文档片段，不使用真实值。
 - 涉及外部 API 的流程必须说明鉴权方式和权限边界。
+- R2 token 只允许目标产物 bucket 的对象读写，不授予 bucket 管理权限；bucket 不开启匿名访问。
 - 涉及文件删除、发布、推送、远程写入的操作必须有明确前置检查。
 
 ## 验证规范

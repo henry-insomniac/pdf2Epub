@@ -45,9 +45,10 @@ type Failure struct {
 }
 
 type Artifact struct {
-	Name string `json:"name"`
-	Path string `json:"-"`
-	Size int64  `json:"size"`
+	Name       string `json:"name"`
+	Path       string `json:"-"`
+	StorageKey string `json:"-"`
+	Size       int64  `json:"size"`
 }
 
 type Snapshot struct {
