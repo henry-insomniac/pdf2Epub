@@ -29,7 +29,9 @@ COPY --from=epubcheck /opt/epubcheck /opt/epubcheck
 COPY deploy/epubcheck /usr/local/bin/epubcheck
 RUN chmod 0555 /usr/local/bin/btc-server /usr/local/bin/epubcheck
 USER 10001:10001
-ENV BTC_ADDR=0.0.0.0:8080 \
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    BTC_ADDR=0.0.0.0:8080 \
     BTC_WORK_DIR=/var/lib/pdf2epub \
     BTC_EPUBCHECK_COMMAND=/usr/local/bin/epubcheck \
     BTC_REQUIRE_EPUBCHECK=true

@@ -231,7 +231,17 @@ func (s *Service) validateEPUB(ctx context.Context, path string) error {
 		}
 		return err
 	}
-	cmd := exec.CommandContext(ctx, resolved, path)
+	validationDir, err := os.MkdirTemp(filepath.Dir(path), ".epubcheck-")
+	if err != nil {
+		return fmt.Errorf("create EPUBCheck directory: %w", err)
+	}
+	defer os.RemoveAll(validationDir)
+	validationPath := filepath.Join(validationDir, "book.epub")
+	if err := os.Link(path, validationPath); err != nil {
+		return fmt.Errorf("create EPUBCheck path alias: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, resolved, validationPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("epubcheck: %w: %s", err, strings.TrimSpace(string(output)))

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,6 +237,7 @@ func (m *Manager) run(ctx context.Context, managed *managedJob) {
 		return
 	}
 	if err != nil {
+		slog.Error("conversion job failed", "job_id", managed.job.Snapshot().ID, "error", err)
 		failure := domain.Failure{Code: "conversion.failed", Message: "PDF 转换失败，请检查文件后重试。"}
 		var conversionFailure ConversionFailure
 		if errors.As(err, &conversionFailure) {
