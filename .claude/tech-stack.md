@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-本文件由脚手架初始化。请根据 `btc-server` 的真实技术栈补充语言、运行时、包管理器、测试框架、构建系统和部署方式。
+`btc-server` 使用 Go 构建可部署的 PDF 转 EPUB Web 服务。正式交付 Linux Docker 镜像和 `docker compose` 示例，生产 HTTPS 由反向代理或云负载均衡器终止。
 
 ## 文档规范
 
@@ -16,15 +16,20 @@
 
 ## 代码规范
 
-请根据项目实际技术栈补充：
+- 语言与工具链：Go 1.26.7。
+- HTTP：标准库 `net/http` 与 `http.ServeMux`。
+- Web UI：原生 HTML、CSS、JavaScript，通过 `go:embed` 嵌入服务；不使用 Node.js 或独立前端构建链。
+- API：同源 JSON HTTP API。
+- 部署：Linux Docker 镜像与 `docker compose`。
+- 格式化：Go 代码必须通过 `gofmt`。
+- PDF 引擎：`go-pdfium` WebAssembly 模式，禁止默认挂载整个容器文件系统。
+- EPUB 生成：Go 代码生成 EPUB 3 包。
+- EPUB 校验：W3C EPUBCheck 命令行工具和最小 Java 运行时，由 Docker 镜像封装。
+- 构建必须固定 PDFium、`go-pdfium`、EPUBCheck 和 Java 运行时版本，并输出第三方许可证清单。
 
-- 语言版本。
-- 包管理器。
-- 格式化工具。
-- lint 工具。
-- 类型检查工具。
-- 测试框架。
-- 构建和发布命令。
+- 依赖管理：Go Modules，`go.mod` 固定直接依赖版本。
+- 测试：标准库 `testing`，HTTP 使用 `httptest`。
+- Java：Docker 使用 Debian bookworm 的 OpenJDK 17 JRE；EPUBCheck 固定为 5.3.0 并校验下载 SHA-256。
 
 ## 脚本规范
 
@@ -51,16 +56,10 @@
 
 ## 验证规范
 
-请将项目真实验证命令补充到这里，例如：
-
 ```bash
-git status --short
-```
-
-后续可按技术栈补充：
-
-```bash
-python -m pytest
-npm test
-npm run lint
+gofmt -w cmd internal
+go vet ./...
+go test ./...
+go test -race ./...
+docker build -t pdf2epub .
 ```

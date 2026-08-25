@@ -1,0 +1,6 @@
+/tmp/
+/.env
+/testdata/private/
+/dist/
+
+.gstack/

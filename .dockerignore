@@ -1,0 +1,7 @@
+.git
+.claude
+tmp
+dist
+.env
+testdata/private
+*.epub

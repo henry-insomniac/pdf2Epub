@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="将带文本层的图书型 PDF 转为可重排 EPUB 3。">
+  <title>纸间 · PDF 转 EPUB</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="纸间首页"><span class="brand-mark">纸</span><span>纸间</span></a>
+    <button id="logoutButton" class="text-button" type="button" hidden>退出</button>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="heroTitle">
+      <p class="eyebrow">PDF → REFLOWABLE EPUB 3</p>
+      <h1 id="heroTitle">把固定的纸页，<br>变成会呼吸的文字。</h1>
+      <p class="intro">上传带文本层的单栏图书型 PDF。服务会重建段落、目录与插图，校验完成后提供 EPUB 下载。</p>
+    </section>
+
+    <section id="loginPanel" class="panel login-panel" aria-labelledby="loginTitle">
+      <div>
+        <p class="step">01 / 登录</p>
+        <h2 id="loginTitle">进入转换台</h2>
+        <p class="muted">使用服务器管理员配置的账号。</p>
+      </div>
+      <form id="loginForm" class="login-form">
+        <label>账号<input id="username" name="username" autocomplete="username" required></label>
+        <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary-button" type="submit">登录</button>
+      </form>
+    </section>
+
+    <section id="workspace" class="workspace" hidden>
+      <div class="section-heading">
+        <div><p class="step">01 / 选择文件</p><h2>开始一次转换</h2></div>
+        <p class="limits">单个 PDF · 最大 100 MiB · 最多 1000 页</p>
+      </div>
+
+      <form id="uploadForm">
+        <label id="dropzone" class="dropzone" for="fileInput">
+          <input id="fileInput" name="file" type="file" accept="application/pdf,.pdf" required>
+          <span class="upload-icon" aria-hidden="true">↑</span>
+          <strong id="fileLabel">拖入 PDF，或点击选择</strong>
+          <span>扫描件、双栏论文、复杂杂志版式暂不支持</span>
+        </label>
+        <div class="upload-actions">
+          <button id="submitButton" class="primary-button" type="submit" disabled>开始转换</button>
+          <button id="clearButton" class="text-button" type="button" hidden>重新选择</button>
+        </div>
+      </form>
+
+      <section id="jobPanel" class="job-panel" aria-live="polite" hidden>
+        <div class="section-heading compact">
+          <div><p class="step">02 / 转换状态</p><h2 id="jobTitle">正在读取 PDF</h2></div>
+          <span id="statusPill" class="status-pill">等待中</span>
+        </div>
+        <div class="progress-track" aria-hidden="true"><div id="progressBar"></div></div>
+        <p id="jobDetail" class="job-detail">任务已建立，正在准备解析器。</p>
+        <div id="warningList" class="warnings"></div>
+        <div class="job-actions">
+          <button id="cancelButton" class="secondary-button" type="button">取消转换</button>
+          <a id="downloadButton" class="primary-button" href="#" hidden>下载 EPUB</a>
+        </div>
+      </section>
+    </section>
+
+    <div id="message" class="message" role="alert" hidden></div>
+  </main>
+
+  <footer><span>不提供 OCR，也不会把正文悄悄变成整页图片。</span><span>任务与文件在结束 1 小时后清理。</span></footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>
