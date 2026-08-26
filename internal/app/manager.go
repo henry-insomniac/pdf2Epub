@@ -48,13 +48,23 @@ func ParseConversionMode(value string) (ConversionMode, error) {
 }
 
 type ManagerConfig struct {
-	WorkDir           string
-	MaxUploadBytes    int64
-	JobTimeout        time.Duration
-	Retention         time.Duration
-	DownloadURLTTL    time.Duration
-	ArtifactStore     ArtifactStore
-	StoreCleanupLimit time.Duration
+	WorkDir              string
+	MaxUploadBytes       int64
+	JobTimeout           time.Duration
+	Retention            time.Duration
+	DownloadURLTTL       time.Duration
+	ArtifactStore        ArtifactStore
+	RequireArtifactStore bool
+	StoreCleanupLimit    time.Duration
+	QueueCapacity        int
+	AuthorizeJob         func(context.Context, string, string) error
+	OnJobOutcome         func(context.Context, JobOutcome)
+}
+
+type JobOutcome struct {
+	JobID   string
+	OwnerID string
+	Status  domain.JobStatus
 }
 
 type ConversionRequest struct {
@@ -99,11 +109,13 @@ func (e ConversionFailure) Error() string {
 
 type managedJob struct {
 	job        *domain.Job
+	ownerID    string
 	jobDir     string
 	sourcePath string
 	cancel     context.CancelFunc
 	done       chan struct{}
 	mode       ConversionMode
+	finishOnce sync.Once
 }
 
 type Manager struct {
@@ -113,6 +125,8 @@ type Manager struct {
 	jobs      map[string]*managedJob
 	activeID  string
 	closed    bool
+	queue     chan *managedJob
+	slots     chan struct{}
 	wg        sync.WaitGroup
 }
 
@@ -137,6 +151,9 @@ func NewManager(config ManagerConfig, converter Converter) (*Manager, error) {
 	if converter == nil {
 		return nil, errors.New("converter is required")
 	}
+	if config.QueueCapacity < 0 {
+		return nil, errors.New("queue capacity cannot be negative")
+	}
 	if err := os.MkdirAll(config.WorkDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create work directory: %w", err)
 	}
@@ -149,79 +166,125 @@ func NewManager(config ManagerConfig, converter Converter) (*Manager, error) {
 			return nil, fmt.Errorf("clean stale work item %q: %w", entry.Name(), err)
 		}
 	}
-	return &Manager{
+	manager := &Manager{
 		config:    config,
 		converter: converter,
 		jobs:      make(map[string]*managedJob),
-	}, nil
+		queue:     make(chan *managedJob, config.QueueCapacity+1),
+		slots:     make(chan struct{}, config.QueueCapacity+1),
+	}
+	manager.wg.Add(1)
+	go manager.worker()
+	return manager, nil
 }
 
 func (m *Manager) Submit(sourceName string, mode ConversionMode, input io.Reader) (domain.Snapshot, error) {
+	return m.SubmitFor("legacy", sourceName, mode, input)
+}
+
+func (m *Manager) SubmitFor(ownerID, sourceName string, mode ConversionMode, input io.Reader) (domain.Snapshot, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return domain.Snapshot{}, errors.New("job owner is required")
+	}
 	mode, err := ParseConversionMode(string(mode))
 	if err != nil {
 		return domain.Snapshot{}, err
 	}
-	m.mu.Lock()
+	m.mu.RLock()
 	if m.closed {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return domain.Snapshot{}, errors.New("manager is closed")
 	}
-	if m.activeID != "" {
-		m.mu.Unlock()
+	m.mu.RUnlock()
+	select {
+	case m.slots <- struct{}{}:
+	default:
 		return domain.Snapshot{}, ErrBusy
 	}
+	releaseSlot := true
+	defer func() {
+		if releaseSlot {
+			<-m.slots
+		}
+	}()
 	id, err := randomID()
 	if err != nil {
-		m.mu.Unlock()
 		return domain.Snapshot{}, fmt.Errorf("create job id: %w", err)
 	}
+	if m.config.AuthorizeJob != nil {
+		if err := m.config.AuthorizeJob(context.Background(), ownerID, id); err != nil {
+			return domain.Snapshot{}, err
+		}
+	}
+	authorized := m.config.AuthorizeJob != nil
+	accepted := false
+	defer func() {
+		if authorized && !accepted {
+			m.notifyOutcome(JobOutcome{JobID: id, OwnerID: ownerID, Status: domain.JobFailed})
+		}
+	}()
 	jobDir := filepath.Join(m.config.WorkDir, id)
 	if err := os.Mkdir(jobDir, 0o700); err != nil {
-		m.mu.Unlock()
 		return domain.Snapshot{}, fmt.Errorf("create job directory: %w", err)
 	}
 	sourcePath := filepath.Join(jobDir, "source.pdf")
 	job := domain.NewJob(id, safeSourceName(sourceName), 0)
-	managed := &managedJob{job: job, jobDir: jobDir, sourcePath: sourcePath, done: make(chan struct{}), mode: mode}
-	m.jobs[id] = managed
-	m.activeID = id
-	m.mu.Unlock()
+	managed := &managedJob{job: job, ownerID: ownerID, jobDir: jobDir, sourcePath: sourcePath, done: make(chan struct{}), mode: mode}
 
 	if err := writeLimitedFile(sourcePath, input, m.config.MaxUploadBytes); err != nil {
 		_ = os.RemoveAll(jobDir)
-		m.mu.Lock()
-		delete(m.jobs, id)
-		if m.activeID == id {
-			m.activeID = ""
-		}
-		m.mu.Unlock()
 		return domain.Snapshot{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), m.config.JobTimeout)
 	m.mu.Lock()
-	managed.cancel = cancel
+	if m.closed {
+		m.mu.Unlock()
+		_ = os.RemoveAll(jobDir)
+		return domain.Snapshot{}, errors.New("manager is closed")
+	}
+	m.jobs[id] = managed
+	m.queue <- managed
 	m.mu.Unlock()
-	m.wg.Add(1)
-	go m.run(ctx, managed)
+	releaseSlot = false
+	accepted = true
 	return job.Snapshot(), nil
 }
 
 func (m *Manager) Get(id string) (domain.Snapshot, bool) {
+	return m.get(id, "", false)
+}
+
+func (m *Manager) GetFor(ownerID, id string) (domain.Snapshot, bool) {
+	return m.get(id, ownerID, true)
+}
+
+func (m *Manager) get(id, ownerID string, enforceOwner bool) (domain.Snapshot, bool) {
 	m.mu.RLock()
 	managed, ok := m.jobs[id]
 	m.mu.RUnlock()
-	if !ok {
+	if !ok || (enforceOwner && managed.ownerID != ownerID) {
 		return domain.Snapshot{}, false
 	}
 	return managed.job.Snapshot(), true
 }
 
 func (m *Manager) Cancel(id string) error {
+	return m.cancel(id, "", false)
+}
+
+func (m *Manager) CancelFor(ownerID, id string) error {
+	return m.cancel(id, ownerID, true)
+}
+
+func (m *Manager) cancel(id, ownerID string, enforceOwner bool) error {
 	m.mu.RLock()
 	managed, ok := m.jobs[id]
+	var cancel context.CancelFunc
+	if ok {
+		cancel = managed.cancel
+	}
 	m.mu.RUnlock()
-	if !ok {
+	if !ok || (enforceOwner && managed.ownerID != ownerID) {
 		return ErrJobNotFound
 	}
 	snapshot := managed.job.Snapshot()
@@ -231,15 +294,32 @@ func (m *Manager) Cancel(id string) error {
 	if err := managed.job.Cancel(); err != nil {
 		return ErrNotCancelable
 	}
-	if managed.cancel != nil {
-		managed.cancel()
+	// Re-read after the state transition: the worker may have attached its
+	// cancellation function between the initial lookup and Job.Cancel().
+	m.mu.RLock()
+	cancel = managed.cancel
+	m.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+		<-managed.done
+	} else {
+		// Queued jobs are still physically present in the bounded channel, but
+		// their credit must not remain reserved behind a long-running job.
+		m.notifyOutcome(JobOutcome{JobID: id, OwnerID: managed.ownerID, Status: domain.JobCanceled})
 	}
-	<-managed.done
 	return nil
 }
 
 func (m *Manager) Download(ctx context.Context, id string) (ArtifactDownload, error) {
-	snapshot, ok := m.Get(id)
+	return m.download(ctx, id, "", false)
+}
+
+func (m *Manager) DownloadFor(ctx context.Context, ownerID, id string) (ArtifactDownload, error) {
+	return m.download(ctx, id, ownerID, true)
+}
+
+func (m *Manager) download(ctx context.Context, id, ownerID string, enforceOwner bool) (ArtifactDownload, error) {
+	snapshot, ok := m.get(id, ownerID, enforceOwner)
 	if !ok {
 		return ArtifactDownload{}, ErrJobNotFound
 	}
@@ -269,18 +349,36 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	for _, managed := range m.jobs {
+		_ = managed.job.Cancel()
 		if managed.cancel != nil {
 			managed.cancel()
 		}
 	}
+	close(m.queue)
 	m.mu.Unlock()
 	m.wg.Wait()
 	m.cleanupStoredArtifacts()
 	_ = os.RemoveAll(m.config.WorkDir)
 }
 
-func (m *Manager) run(ctx context.Context, managed *managedJob) {
+func (m *Manager) worker() {
 	defer m.wg.Done()
+	for managed := range m.queue {
+		if managed.job.Snapshot().Status == domain.JobCanceled {
+			_ = os.RemoveAll(managed.jobDir)
+			m.finish(managed)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), m.config.JobTimeout)
+		m.mu.Lock()
+		managed.cancel = cancel
+		m.activeID = managed.job.Snapshot().ID
+		m.mu.Unlock()
+		m.run(ctx, managed)
+	}
+}
+
+func (m *Manager) run(ctx context.Context, managed *managedJob) {
 	defer managed.cancel()
 	if err := managed.job.Start(); err != nil {
 		m.finish(managed)
@@ -320,6 +418,15 @@ func (m *Manager) run(ctx context.Context, managed *managedJob) {
 		storageKey, publishErr := m.config.ArtifactStore.Publish(ctx, managed.job.Snapshot().ID, result.Artifact)
 		if publishErr != nil {
 			slog.Error("publish artifact to object storage failed", "job_id", managed.job.Snapshot().ID, "error", publishErr)
+			if m.config.RequireArtifactStore {
+				_ = managed.job.Fail(domain.Failure{
+					Code:    "delivery.object_store_unavailable",
+					Message: "云端下载暂时不可用，本次转换未扣除额度，请稍后重试。",
+				})
+				_ = os.RemoveAll(managed.jobDir)
+				m.finish(managed)
+				return
+			}
 			managed.job.AddWarning(domain.Warning{
 				Code:    "delivery.object_store_fallback",
 				Message: "云端下载暂时不可用，本次使用源站下载。",
@@ -341,23 +448,34 @@ func (m *Manager) run(ctx context.Context, managed *managedJob) {
 }
 
 func (m *Manager) finish(managed *managedJob) {
-	id := managed.job.Snapshot().ID
-	m.mu.Lock()
-	if m.activeID == id {
-		m.activeID = ""
-	}
-	m.mu.Unlock()
-	close(managed.done)
-	time.AfterFunc(m.config.Retention, func() {
+	managed.finishOnce.Do(func() {
 		snapshot := managed.job.Snapshot()
-		if snapshot.Artifact != nil {
-			m.deleteStoredArtifact(*snapshot.Artifact)
-		}
-		_ = os.RemoveAll(managed.jobDir)
+		id := snapshot.ID
 		m.mu.Lock()
-		delete(m.jobs, id)
+		if m.activeID == id {
+			m.activeID = ""
+		}
 		m.mu.Unlock()
+		m.notifyOutcome(JobOutcome{JobID: id, OwnerID: managed.ownerID, Status: snapshot.Status})
+		<-m.slots
+		close(managed.done)
+		time.AfterFunc(m.config.Retention, func() {
+			snapshot := managed.job.Snapshot()
+			if snapshot.Artifact != nil {
+				m.deleteStoredArtifact(*snapshot.Artifact)
+			}
+			_ = os.RemoveAll(managed.jobDir)
+			m.mu.Lock()
+			delete(m.jobs, id)
+			m.mu.Unlock()
+		})
 	})
+}
+
+func (m *Manager) notifyOutcome(outcome JobOutcome) {
+	if m.config.OnJobOutcome != nil {
+		m.config.OnJobOutcome(context.Background(), outcome)
+	}
 }
 
 func (m *Manager) cleanupStoredArtifacts() {

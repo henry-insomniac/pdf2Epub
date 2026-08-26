@@ -5,6 +5,32 @@ import (
 	"time"
 )
 
+func TestGuestSessionIsSignedAndSurvivesManagerRestart(t *testing.T) {
+	secret := []byte("01234567890123456789012345678901")
+	first := NewManager("admin", "password", time.Hour, secret)
+	session, err := first.CreateGuest()
+	if err != nil {
+		t.Fatalf("CreateGuest(): %v", err)
+	}
+	if session.Role != RoleGuest || session.SubjectID == "" || session.CSRFToken == "" {
+		t.Fatalf("guest session = %#v", session)
+	}
+
+	restarted := NewManager("admin", "password", time.Hour, secret)
+	restored, ok := restarted.Validate(session.Token)
+	if !ok {
+		t.Fatal("signed guest session was not valid after manager restart")
+	}
+	if restored.SubjectID != session.SubjectID || restored.CSRFToken != session.CSRFToken {
+		t.Fatalf("restored session = %#v, want subject/csrf from %#v", restored, session)
+	}
+
+	tampered := session.Token[:len(session.Token)-1] + "x"
+	if _, ok := restarted.Validate(tampered); ok {
+		t.Fatal("tampered guest session was accepted")
+	}
+}
+
 func TestSessionLifecycle(t *testing.T) {
 	manager := NewManager("admin", "secret password", 12*time.Hour)
 

@@ -29,7 +29,7 @@ func TestUploadUIReportsProgressBeforeJobCreation(t *testing.T) {
 		}
 	}
 
-	if strings.Index(source, "renderUpload(0, file.size)") > strings.Index(source, "await uploadJob(form, renderUpload)") {
+	if strings.Index(source, "renderUpload(0, file.size)") > strings.Index(source, "await uploadJob(form, uploadTicket, renderUpload)") {
 		t.Error("initial upload feedback must render before awaiting the upload request")
 	}
 
@@ -37,7 +37,7 @@ func TestUploadUIReportsProgressBeforeJobCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, versionedAsset := range []string{"/app.js?v=upload-feedback-1", "/mode.css?v=upload-feedback-1"} {
+	for _, versionedAsset := range []string{"/app.js?v=public-beta-1", "/mode.css?v=public-beta-1"} {
 		if !strings.Contains(string(markup), versionedAsset) {
 			t.Errorf("index.html does not cache-bust changed asset %q", versionedAsset)
 		}

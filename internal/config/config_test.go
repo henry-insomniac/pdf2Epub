@@ -108,3 +108,39 @@ func TestLoadRejectsPartialR2Configuration(t *testing.T) {
 		t.Fatal("Load() error = nil, want partial R2 configuration error")
 	}
 }
+
+func TestLoadEnablesPublicPaidAccessOnlyWithCompleteSecurityConfiguration(t *testing.T) {
+	t.Setenv("BTC_PUBLIC_ACCESS", "true")
+	t.Setenv("BTC_PUBLIC_URL", "https://epub.yi-flow.com")
+	t.Setenv("BTC_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("BTC_SECURE_COOKIE", "true")
+	t.Setenv("BTC_COMMERCE_DB_PATH", "/var/lib/pdf2epub-data/commerce.db")
+	t.Setenv("BTC_STRIPE_SECRET_KEY", "sk_test")
+	t.Setenv("BTC_STRIPE_WEBHOOK_SECRET", "whsec_test")
+	t.Setenv("BTC_STRIPE_PRICE_ID", "price_test")
+	t.Setenv("BTC_TURNSTILE_SITE_KEY", "site_test")
+	t.Setenv("BTC_TURNSTILE_SECRET_KEY", "turnstile_secret")
+	t.Setenv("BTC_R2_ACCOUNT_ID", "account-id")
+	t.Setenv("BTC_R2_ACCESS_KEY_ID", "access-key")
+	t.Setenv("BTC_R2_SECRET_ACCESS_KEY", "secret-key")
+	t.Setenv("BTC_R2_BUCKET", "pdf2epub")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if !got.PublicAccess || got.QueueCapacity != 3 || got.SessionTTL != 365*24*time.Hour || got.MaxUploadBytes != 90<<20 {
+		t.Fatalf("public config = %#v", got)
+	}
+}
+
+func TestLoadRejectsPublicAccessWithoutHTTPSAndPaymentControls(t *testing.T) {
+	t.Setenv("BTC_PUBLIC_ACCESS", "true")
+	t.Setenv("BTC_PUBLIC_URL", "http://epub.yi-flow.com")
+	t.Setenv("BTC_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("BTC_SECURE_COOKIE", "true")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want unsafe public access configuration error")
+	}
+}

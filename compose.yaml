@@ -5,11 +5,23 @@ services:
     ports:
       - "${BTC_BIND_IP:-127.0.0.1}:${BTC_PORT:-8080}:8080"
     environment:
-      BTC_USERNAME: "${BTC_USERNAME:?set BTC_USERNAME}"
-      BTC_PASSWORD: "${BTC_PASSWORD:?set BTC_PASSWORD}"
+      BTC_PUBLIC_ACCESS: "${BTC_PUBLIC_ACCESS:-false}"
+      BTC_PUBLIC_URL: "${BTC_PUBLIC_URL:-}"
+      BTC_USERNAME: "${BTC_USERNAME:-}"
+      BTC_PASSWORD: "${BTC_PASSWORD:-}"
       BTC_SESSION_SECRET: "${BTC_SESSION_SECRET:?set a random secret of at least 32 bytes}"
       BTC_SECURE_COOKIE: "${BTC_SECURE_COOKIE:-false}"
       BTC_FIXED_LAYOUT_DPI: "${BTC_FIXED_LAYOUT_DPI:-144}"
+      BTC_MAX_UPLOAD_MIB: "${BTC_MAX_UPLOAD_MIB:-}"
+      BTC_QUEUE_CAPACITY: "${BTC_QUEUE_CAPACITY:-}"
+      BTC_COMMERCE_DB_PATH: "/var/lib/pdf2epub-data/commerce.db"
+      BTC_CREDIT_PACK_CREDITS: "${BTC_CREDIT_PACK_CREDITS:-5}"
+      BTC_CREDIT_PACK_LABEL: "${BTC_CREDIT_PACK_LABEL:-USD 1.99}"
+      BTC_STRIPE_SECRET_KEY: "${BTC_STRIPE_SECRET_KEY:-}"
+      BTC_STRIPE_WEBHOOK_SECRET: "${BTC_STRIPE_WEBHOOK_SECRET:-}"
+      BTC_STRIPE_PRICE_ID: "${BTC_STRIPE_PRICE_ID:-}"
+      BTC_TURNSTILE_SITE_KEY: "${BTC_TURNSTILE_SITE_KEY:-}"
+      BTC_TURNSTILE_SECRET_KEY: "${BTC_TURNSTILE_SECRET_KEY:-}"
       BTC_R2_ACCOUNT_ID: "${BTC_R2_ACCOUNT_ID:-}"
       BTC_R2_ACCESS_KEY_ID: "${BTC_R2_ACCESS_KEY_ID:-}"
       BTC_R2_SECRET_ACCESS_KEY: "${BTC_R2_SECRET_ACCESS_KEY:-}"
@@ -18,6 +30,7 @@ services:
       BTC_DOWNLOAD_URL_TTL: "${BTC_DOWNLOAD_URL_TTL:-15m}"
     volumes:
       - pdf2epub-work:/var/lib/pdf2epub
+      - pdf2epub-data:/var/lib/pdf2epub-data
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -27,3 +40,4 @@ services:
 
 volumes:
   pdf2epub-work:
+  pdf2epub-data:

@@ -22,8 +22,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 pdf2epub \
     && useradd --system --uid 10001 --gid pdf2epub --home-dir /nonexistent --shell /usr/sbin/nologin pdf2epub \
-    && mkdir -p /var/lib/pdf2epub \
-    && chown pdf2epub:pdf2epub /var/lib/pdf2epub
+    && mkdir -p /var/lib/pdf2epub /var/lib/pdf2epub-data \
+    && chown pdf2epub:pdf2epub /var/lib/pdf2epub /var/lib/pdf2epub-data
 COPY --from=builder /out/btc-server /usr/local/bin/btc-server
 COPY --from=epubcheck /opt/epubcheck /opt/epubcheck
 COPY deploy/epubcheck /usr/local/bin/epubcheck
