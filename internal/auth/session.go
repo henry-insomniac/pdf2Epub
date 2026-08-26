@@ -100,12 +100,19 @@ func (m *Manager) CreateGuest() (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	return m.CreateGuestFor("guest:" + subjectToken)
+}
+
+func (m *Manager) CreateGuestFor(subjectID string) (Session, error) {
+	if !strings.HasPrefix(subjectID, "guest:") || len(subjectID) < len("guest:")+16 || len(subjectID) > 128 {
+		return Session{}, errors.New("invalid guest subject")
+	}
 	csrfToken, err := randomToken(32)
 	if err != nil {
 		return Session{}, err
 	}
 	claims := guestClaims{
-		SubjectID: "guest:" + subjectToken,
+		SubjectID: subjectID,
 		CSRFToken: csrfToken,
 		ExpiresAt: m.now().Add(m.ttl).Unix(),
 	}

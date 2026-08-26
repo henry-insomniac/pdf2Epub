@@ -33,6 +33,8 @@ type API struct {
 	subjectLimit      *requestLimiter
 	commerce          *commerce.Service
 	challenge         abuse.Verifier
+	challengeIssuer   abuse.Issuer
+	challengeProvider string
 	challengeKey      string
 	uploadTickets     *uploadTickets
 	trustProxyHeaders bool
@@ -43,21 +45,27 @@ type Options struct {
 	PublicAccess      bool
 	Commerce          *commerce.Service
 	Challenge         abuse.Verifier
+	ChallengeIssuer   abuse.Issuer
+	ChallengeProvider string
 	ChallengeSiteKey  string
 	TrustProxyHeaders bool
 }
 
 type sessionResponse struct {
-	Username         string         `json:"username"`
-	Role             string         `json:"role"`
-	Access           string         `json:"access"`
-	CSRFToken        string         `json:"csrf_token"`
-	ExpiresAt        time.Time      `json:"expires_at"`
-	Credits          int64          `json:"credits"`
-	BillingEnabled   bool           `json:"billing_enabled"`
-	Pack             *commerce.Pack `json:"pack,omitempty"`
-	ChallengeSiteKey string         `json:"challenge_site_key,omitempty"`
-	MaxUploadBytes   int64          `json:"max_upload_bytes"`
+	Username          string         `json:"username"`
+	Role              string         `json:"role"`
+	Access            string         `json:"access"`
+	CSRFToken         string         `json:"csrf_token"`
+	ExpiresAt         time.Time      `json:"expires_at"`
+	Credits           int64          `json:"credits"`
+	BillingEnabled    bool           `json:"billing_enabled"`
+	CheckoutEnabled   bool           `json:"checkout_enabled"`
+	VoucherEnabled    bool           `json:"voucher_enabled"`
+	Pack              *commerce.Pack `json:"pack,omitempty"`
+	ChallengeProvider string         `json:"challenge_provider,omitempty"`
+	ChallengeURL      string         `json:"challenge_url,omitempty"`
+	ChallengeSiteKey  string         `json:"challenge_site_key,omitempty"`
+	MaxUploadBytes    int64          `json:"max_upload_bytes"`
 }
 
 type errorEnvelope struct {
@@ -74,6 +82,9 @@ func New(sessions *auth.Manager, jobs *app.Manager, maxUpload int64, secureCooki
 }
 
 func NewWithOptions(sessions *auth.Manager, jobs *app.Manager, maxUpload int64, secureCookie bool, options Options) *API {
+	if options.ChallengeProvider == "" && options.ChallengeSiteKey != "" {
+		options.ChallengeProvider = "turnstile"
+	}
 	api := &API{
 		sessions:          sessions,
 		jobs:              jobs,
@@ -84,6 +95,8 @@ func NewWithOptions(sessions *auth.Manager, jobs *app.Manager, maxUpload int64, 
 		subjectLimit:      newRequestLimiter(1, 12),
 		commerce:          options.Commerce,
 		challenge:         options.Challenge,
+		challengeIssuer:   options.ChallengeIssuer,
+		challengeProvider: options.ChallengeProvider,
 		challengeKey:      options.ChallengeSiteKey,
 		uploadTickets:     newUploadTickets(2 * time.Minute),
 		trustProxyHeaders: options.TrustProxyHeaders,
@@ -111,7 +124,9 @@ func (a *API) routes() {
 	a.mux.HandleFunc("POST /api/v1/auth/logout", a.withSession(a.handleLogout, true))
 	a.mux.HandleFunc("GET /api/v1/session", a.withSession(a.handleSession, false))
 	a.mux.HandleFunc("POST /api/v1/upload-tickets", a.withSession(a.handleUploadTicket, true))
+	a.mux.HandleFunc("GET /api/v1/challenge", a.withSession(a.handleChallenge, false))
 	a.mux.HandleFunc("POST /api/v1/billing/checkout", a.withSession(a.handleCheckout, true))
+	a.mux.HandleFunc("POST /api/v1/billing/redeem", a.withSession(a.handleRedeem, true))
 	a.mux.HandleFunc("POST /api/v1/billing/webhook", a.handleBillingWebhook)
 	a.mux.HandleFunc("POST /api/v1/jobs", a.withSession(a.handleCreateJob, true))
 	a.mux.HandleFunc("GET /api/v1/jobs/{id}", a.withSession(a.handleGetJob, false))
@@ -176,7 +191,7 @@ func (a *API) handleGuest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "identity.session_failed", "暂时无法建立访问会话，请稍后重试。")
 		return
 	}
-	if a.commerce == nil || a.challenge == nil || a.challengeKey == "" {
+	if a.commerce == nil || a.challenge == nil || (a.challengeProvider == "turnstile" && a.challengeKey == "") {
 		writeError(w, http.StatusServiceUnavailable, "service.public_access_unavailable", "公开转换服务尚未完成安全配置。")
 		return
 	}
@@ -243,8 +258,16 @@ func (a *API) sessionPayload(ctx context.Context, session auth.Session) (session
 		pack := a.commerce.Pack()
 		response.Credits = balance
 		response.BillingEnabled = true
+		response.CheckoutEnabled = a.commerce.CheckoutEnabled()
+		response.VoucherEnabled = a.commerce.VouchersEnabled()
 		response.Pack = &pack
-		response.ChallengeSiteKey = a.challengeKey
+		response.ChallengeProvider = a.challengeProvider
+		if a.challengeProvider == "turnstile" {
+			response.ChallengeSiteKey = a.challengeKey
+		}
+		if a.challengeIssuer != nil {
+			response.ChallengeURL = "/api/v1/challenge"
+		}
 	}
 	return response, nil
 }
@@ -362,8 +385,22 @@ func (a *API) handleUploadTicket(w http.ResponseWriter, r *http.Request, session
 	writeJSON(w, http.StatusCreated, map[string]any{"upload_ticket": ticket, "expires_in": 120})
 }
 
+func (a *API) handleChallenge(w http.ResponseWriter, r *http.Request, _ auth.Session) {
+	if !a.publicAccess || a.challengeIssuer == nil {
+		writeError(w, http.StatusNotFound, "request.not_found", "请求的接口不存在。")
+		return
+	}
+	challenge, err := a.challengeIssuer.Issue(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "abuse.challenge_unavailable", "暂时无法建立人机验证，请稍后重试。")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, challenge)
+}
+
 func (a *API) handleCheckout(w http.ResponseWriter, r *http.Request, session auth.Session) {
-	if !a.publicAccess || a.commerce == nil || a.challenge == nil {
+	if !a.publicAccess || a.commerce == nil || !a.commerce.CheckoutEnabled() || a.challenge == nil {
 		writeError(w, http.StatusNotFound, "request.not_found", "请求的接口不存在。")
 		return
 	}
@@ -388,8 +425,53 @@ func (a *API) handleCheckout(w http.ResponseWriter, r *http.Request, session aut
 	writeJSON(w, http.StatusCreated, map[string]string{"checkout_url": checkout.URL})
 }
 
+func (a *API) handleRedeem(w http.ResponseWriter, r *http.Request, session auth.Session) {
+	if !a.publicAccess || a.commerce == nil || !a.commerce.VouchersEnabled() || a.challenge == nil {
+		writeError(w, http.StatusNotFound, "request.not_found", "请求的接口不存在。")
+		return
+	}
+	var request struct {
+		Code  string `json:"code"`
+		Token string `json:"challenge_token"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || ensureJSONEOF(decoder) != nil {
+		writeError(w, http.StatusBadRequest, "request.invalid_json", "兑换请求格式不正确。")
+		return
+	}
+	if err := a.challenge.Verify(r.Context(), request.Token, clientIP(r, a.trustProxyHeaders)); err != nil {
+		writeError(w, http.StatusForbidden, "abuse.challenge_rejected", "人机验证未通过，请重试。")
+		return
+	}
+	redemption, err := a.commerce.RedeemVoucher(r.Context(), session.SubjectID, request.Code)
+	switch {
+	case errors.Is(err, commerce.ErrInvalidVoucher):
+		writeError(w, http.StatusBadRequest, "billing.voucher_invalid", "兑换码无效或已过期。")
+	case errors.Is(err, commerce.ErrVoucherRedeemed):
+		writeError(w, http.StatusConflict, "billing.voucher_redeemed", "该兑换码已经使用。")
+	case err != nil:
+		writeError(w, http.StatusServiceUnavailable, "billing.redeem_unavailable", "暂时无法兑换额度，请稍后重试。")
+	default:
+		csrfToken := session.CSRFToken
+		if redemption.AccountID != session.SubjectID {
+			recoveredSession, sessionErr := a.sessions.CreateGuestFor(redemption.AccountID)
+			if sessionErr != nil {
+				writeError(w, http.StatusInternalServerError, "identity.session_failed", "额度已找到，但暂时无法恢复访问会话。")
+				return
+			}
+			a.setSessionCookie(w, recoveredSession)
+			csrfToken = recoveredSession.CSRFToken
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"credits": redemption.Credits, "credits_added": redemption.CreditsAdded,
+			"recovered": redemption.Recovered, "csrf_token": csrfToken,
+		})
+	}
+}
+
 func (a *API) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
-	if !a.publicAccess || a.commerce == nil {
+	if !a.publicAccess || a.commerce == nil || !a.commerce.CheckoutEnabled() {
 		writeError(w, http.StatusNotFound, "request.not_found", "请求的接口不存在。")
 		return
 	}
@@ -506,7 +588,7 @@ func (a *API) withSession(next sessionHandler, requireCSRF bool) http.HandlerFun
 
 func (a *API) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://checkout.stripe.com")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' https://challenges.cloudflare.com https://cdn.jsdelivr.net; worker-src 'self' blob:; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://checkout.stripe.com")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")

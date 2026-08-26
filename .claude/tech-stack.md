@@ -27,8 +27,8 @@
 - EPUB 校验：W3C EPUBCheck 命令行工具和最小 Java 运行时，由 Docker 镜像封装。
 - 产物交付：可选 Cloudflare R2 私有 bucket，通过 AWS SDK for Go v2 的 S3 兼容 API 上传、生成短期签名 URL 并清理对象。
 - 商业账本：`go.etcd.io/bbolt` 单文件 ACID KV 数据库；用于单机 Beta 的账户、余额、不可变额度流水、订单、支付事件和任务扣费，不与任务临时目录共用生命周期。标准库文件或 JSON 原子替换无法安全覆盖并发扣费与幂等回调；横向扩容前应迁移 PostgreSQL。
-- 支付：Stripe Checkout；服务端使用标准库 HTTP 创建 Checkout Session，webhook 使用 HMAC SHA-256、时间窗、订单绑定和事件去重验签，不引入支付 SDK。网关接口与账本分离，后续可增加本地支付渠道。
-- 反滥用：Cloudflare Turnstile Siteverify、一次性上传票据、IP/subject token bucket、有限单工作器队列、容器资源限制。Turnstile secret 只在服务端使用。
+- 额度渠道：默认 `voucher` 使用标准库 HMAC SHA-256 签发一次入账、可恢复钱包的 bearer code；可选 Stripe Checkout 使用标准库 HTTP 创建 Session，并以时间窗、订单绑定和事件去重验签 webhook。两者通过账本边界隔离。
+- 反滥用：默认使用 `github.com/altcha-org/altcha-lib-go/v2` 签发和验证 `PBKDF2/SHA-256` 工作量证明；前端 widget 固定为 `altcha@3.2.2` CDN 版本。可选 Cloudflare Turnstile Siteverify。两种模式都叠加一次性上传票据、IP/subject token bucket、有限单工作器队列和容器资源限制。
 - 构建必须固定 PDFium、`go-pdfium`、EPUBCheck 和 Java 运行时版本，并输出第三方许可证清单。
 
 - 依赖管理：Go Modules，`go.mod` 固定直接依赖版本。
@@ -57,7 +57,7 @@
 - 示例配置使用 `.env.example` 或文档片段，不使用真实值。
 - 涉及外部 API 的流程必须说明鉴权方式和权限边界。
 - R2 token 只允许目标产物 bucket 的对象读写，不授予 bucket 管理权限；bucket 不开启匿名访问。
-- Stripe secret key、webhook secret、Turnstile secret 和 bbolt 账本不得进入镜像、Git、前端响应或日志；site key 与 Stripe Price ID 可以公开，但展示价格必须与 Stripe Price 人工核对。
+- Voucher secret、完整额度码、Stripe secret key、webhook secret、Turnstile secret 和 bbolt 账本不得进入镜像、Git、前端响应或日志；额度码按 bearer recovery credential 管理。site key 与 Stripe Price ID 可以公开，但展示价格必须与 Stripe Price 人工核对。
 - 公开模式必须通过反向代理 HTTPS 运行并保持源站不可直接访问；只有在该边界成立时才可信任代理转发的客户端 IP header。
 - 涉及文件删除、发布、推送、远程写入的操作必须有明确前置检查。
 

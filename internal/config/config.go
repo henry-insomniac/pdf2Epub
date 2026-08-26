@@ -40,9 +40,12 @@ type Config struct {
 	QueueCapacity       int
 	CreditPackCredits   int64
 	CreditPackLabel     string
+	PaymentProvider     string
 	StripeSecretKey     string
 	StripeWebhookSecret string
 	StripePriceID       string
+	VoucherSecret       []byte
+	ChallengeProvider   string
 	TurnstileSiteKey    string
 	TurnstileSecretKey  string
 }
@@ -74,10 +77,13 @@ func Load() (Config, error) {
 		PublicURL:           strings.TrimRight(strings.TrimSpace(envOrDefault("BTC_PUBLIC_URL", "")), "/"),
 		CommerceDBPath:      envOrDefault("BTC_COMMERCE_DB_PATH", "/tmp/pdf2epub-commerce/commerce.db"),
 		CreditPackCredits:   5,
-		CreditPackLabel:     strings.TrimSpace(envOrDefault("BTC_CREDIT_PACK_LABEL", "USD 1.99")),
+		CreditPackLabel:     strings.TrimSpace(envOrDefault("BTC_CREDIT_PACK_LABEL", "5 次额度")),
+		PaymentProvider:     strings.ToLower(strings.TrimSpace(envOrDefault("BTC_PAYMENT_PROVIDER", ""))),
 		StripeSecretKey:     secretValue("BTC_STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: secretValue("BTC_STRIPE_WEBHOOK_SECRET"),
 		StripePriceID:       strings.TrimSpace(secretValue("BTC_STRIPE_PRICE_ID")),
+		VoucherSecret:       []byte(secretValue("BTC_VOUCHER_SECRET")),
+		ChallengeProvider:   strings.ToLower(strings.TrimSpace(envOrDefault("BTC_CHALLENGE_PROVIDER", ""))),
 		TurnstileSiteKey:    strings.TrimSpace(secretValue("BTC_TURNSTILE_SITE_KEY")),
 		TurnstileSecretKey:  secretValue("BTC_TURNSTILE_SECRET_KEY"),
 	}
@@ -125,6 +131,20 @@ func Load() (Config, error) {
 		cfg.CreditPackCredits = credits
 	}
 	if cfg.PublicAccess {
+		if cfg.PaymentProvider == "" {
+			if cfg.StripeSecretKey != "" || cfg.StripeWebhookSecret != "" || cfg.StripePriceID != "" {
+				cfg.PaymentProvider = "stripe"
+			} else {
+				cfg.PaymentProvider = "voucher"
+			}
+		}
+		if cfg.ChallengeProvider == "" {
+			if cfg.TurnstileSiteKey != "" || cfg.TurnstileSecretKey != "" {
+				cfg.ChallengeProvider = "turnstile"
+			} else {
+				cfg.ChallengeProvider = "altcha"
+			}
+		}
 		if !cfg.SecureCookie {
 			return Config{}, errors.New("BTC_SECURE_COOKIE must be true when BTC_PUBLIC_ACCESS is enabled")
 		}
@@ -135,11 +155,26 @@ func Load() (Config, error) {
 		if !filepath.IsAbs(cfg.CommerceDBPath) {
 			return Config{}, errors.New("BTC_COMMERCE_DB_PATH must be an absolute path")
 		}
-		if cfg.StripeSecretKey == "" || cfg.StripeWebhookSecret == "" || cfg.StripePriceID == "" {
-			return Config{}, errors.New("Stripe secret key, webhook secret and price ID are required for public access")
+		switch cfg.PaymentProvider {
+		case "stripe":
+			if cfg.StripeSecretKey == "" || cfg.StripeWebhookSecret == "" || cfg.StripePriceID == "" {
+				return Config{}, errors.New("Stripe secret key, webhook secret and price ID are required when BTC_PAYMENT_PROVIDER=stripe")
+			}
+		case "voucher":
+			if len(cfg.VoucherSecret) < 32 {
+				return Config{}, errors.New("BTC_VOUCHER_SECRET must contain at least 32 bytes when BTC_PAYMENT_PROVIDER=voucher")
+			}
+		default:
+			return Config{}, errors.New("BTC_PAYMENT_PROVIDER must be stripe or voucher")
 		}
-		if cfg.TurnstileSiteKey == "" || cfg.TurnstileSecretKey == "" {
-			return Config{}, errors.New("Turnstile site key and secret key are required for public access")
+		switch cfg.ChallengeProvider {
+		case "turnstile":
+			if cfg.TurnstileSiteKey == "" || cfg.TurnstileSecretKey == "" {
+				return Config{}, errors.New("Turnstile site key and secret key are required when BTC_CHALLENGE_PROVIDER=turnstile")
+			}
+		case "altcha":
+		default:
+			return Config{}, errors.New("BTC_CHALLENGE_PROVIDER must be altcha or turnstile")
 		}
 		if cfg.CreditPackLabel == "" {
 			return Config{}, errors.New("BTC_CREDIT_PACK_LABEL is required for public access")
@@ -179,6 +214,10 @@ func secretValue(name string) string {
 		return ""
 	}
 	return string(data[:len(data)-trailingNewlines(data)])
+}
+
+func ReadSecret(name string) string {
+	return secretValue(name)
 }
 
 func trailingNewlines(data []byte) int {

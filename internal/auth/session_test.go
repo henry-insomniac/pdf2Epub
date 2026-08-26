@@ -31,6 +31,20 @@ func TestGuestSessionIsSignedAndSurvivesManagerRestart(t *testing.T) {
 	}
 }
 
+func TestGuestSessionCanBeReissuedForRecoveredWallet(t *testing.T) {
+	manager := NewManager("", "", time.Hour, []byte("01234567890123456789012345678901"))
+	session, err := manager.CreateGuestFor("guest:0123456789abcdef")
+	if err != nil {
+		t.Fatalf("CreateGuestFor(): %v", err)
+	}
+	if session.SubjectID != "guest:0123456789abcdef" {
+		t.Fatalf("SubjectID = %q", session.SubjectID)
+	}
+	if _, err := manager.CreateGuestFor("admin:wrong-boundary"); err == nil {
+		t.Fatal("CreateGuestFor() accepted a non-guest subject")
+	}
+}
+
 func TestSessionLifecycle(t *testing.T) {
 	manager := NewManager("admin", "secret password", 12*time.Hour)
 

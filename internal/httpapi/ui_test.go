@@ -37,7 +37,7 @@ func TestUploadUIReportsProgressBeforeJobCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, versionedAsset := range []string{"/app.js?v=public-beta-1", "/mode.css?v=public-beta-1"} {
+	for _, versionedAsset := range []string{"/app.js?v=voucher-altcha-1", "/mode.css?v=voucher-altcha-1"} {
 		if !strings.Contains(string(markup), versionedAsset) {
 			t.Errorf("index.html does not cache-bust changed asset %q", versionedAsset)
 		}

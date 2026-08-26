@@ -42,6 +42,13 @@
 - 修复：增加签名访客 subject、所有任务读写的 owner 校验、IP/subject 限流、Turnstile 一次性上传票据、有限单工作器队列，以及 bbolt 持久化额度/订单/支付事件/任务扣费；任务接受时扣 1 次，失败、取消或进程重启遗留的未终态扣费幂等退款；公开模式缺少 Stripe、Turnstile、R2、HTTPS 或 Secure Cookie 时拒绝启动，R2 发布失败也禁止退回源站下载。
 - 验证：新增访客会话跨重启验签、篡改拒绝、跨 owner 统一 404、无票据上传拒绝、额度不足 402、接受扣费、取消退款、队列顺序与溢出、R2 强制交付失败、Stripe webhook 验签/重放去重和 Turnstile Siteverify 回归测试。
 
+## 2026-08-26：个人运营依赖 Stripe 与 Turnstile 账号
+
+- 现象：公开模式虽然具备商业化与防滥用边界，但启动强制要求 Stripe 和 Cloudflare Turnstile 凭据，个人运营者可能因主体、地区或审核门槛无法上线。
+- 原因：首个公开 Beta 把具体第三方 provider 写成了公开模式的必选配置，没有保留“额度账本能力”和“收款/挑战供应商”的独立选择。
+- 修复：把支付和挑战分别改为 provider 配置；增加 HMAC 额度码的一次入账与跨浏览器钱包恢复，增加服务端签发/验证且拒绝重放的 ALTCHA 工作量证明，同时保留 Stripe 和 Turnstile 可选路径。
+- 验证：覆盖 voucher 签名篡改、幂等入账、跨浏览器 subject 恢复、ALTCHA 过期与 replay、challenge/redeem HTTP 流程、公开配置 fail-closed 和 UI 静态资源回归。
+
 本文件用于记录 `btc-server` 的重要 bug、回归、排障结论和修复验证。轻微拼写或纯格式调整不需要记录。
 
 ## 记录模板
