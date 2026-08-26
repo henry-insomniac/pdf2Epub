@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"pdf2epub/internal/abuse"
 	"pdf2epub/internal/app"
@@ -20,6 +23,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "voucher" {
+		if err := runVoucherCommand(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
 	if err != nil {
@@ -56,15 +66,19 @@ func main() {
 	}
 	var billing *commerce.Service
 	var challenge abuse.Verifier
+	var challengeIssuer abuse.Issuer
 	var authorizeJob func(context.Context, string, string) error
 	var onJobOutcome func(context.Context, app.JobOutcome)
 	if cfg.PublicAccess {
-		stripe, err := commerce.NewStripeGateway(commerce.StripeConfig{
-			SecretKey: cfg.StripeSecretKey, WebhookSecret: cfg.StripeWebhookSecret,
-		})
-		if err != nil {
-			logger.Error("initialize Stripe gateway", "error", err)
-			os.Exit(1)
+		var gateway commerce.Gateway
+		if cfg.PaymentProvider == "stripe" {
+			gateway, err = commerce.NewStripeGateway(commerce.StripeConfig{
+				SecretKey: cfg.StripeSecretKey, WebhookSecret: cfg.StripeWebhookSecret,
+			})
+			if err != nil {
+				logger.Error("initialize Stripe gateway", "error", err)
+				os.Exit(1)
+			}
 		}
 		billing, err = commerce.Open(commerce.Config{
 			DatabasePath: cfg.CommerceDBPath,
@@ -72,7 +86,7 @@ func main() {
 			Pack: commerce.Pack{
 				Credits: cfg.CreditPackCredits, PriceLabel: cfg.CreditPackLabel, PriceID: cfg.StripePriceID,
 			},
-			Gateway: stripe,
+			Gateway: gateway, VoucherSecret: cfg.VoucherSecret,
 		})
 		if err != nil {
 			logger.Error("initialize commerce ledger", "error", err)
@@ -83,9 +97,16 @@ func main() {
 				logger.Error("close commerce ledger", "error", err)
 			}
 		}()
-		challenge, err = abuse.NewTurnstile(abuse.TurnstileConfig{SecretKey: cfg.TurnstileSecretKey})
+		if cfg.ChallengeProvider == "turnstile" {
+			challenge, err = abuse.NewTurnstile(abuse.TurnstileConfig{SecretKey: cfg.TurnstileSecretKey})
+		} else {
+			var altcha *abuse.ALTCHA
+			altcha, err = abuse.NewALTCHA(cfg.SessionSecret)
+			challenge = altcha
+			challengeIssuer = altcha
+		}
 		if err != nil {
-			logger.Error("initialize Turnstile verifier", "error", err)
+			logger.Error("initialize challenge verifier", "provider", cfg.ChallengeProvider, "error", err)
 			os.Exit(1)
 		}
 		authorizeJob = billing.AuthorizeJob
@@ -94,7 +115,7 @@ func main() {
 				logger.Error("record billable job outcome", "job_id", outcome.JobID, "error", err)
 			}
 		}
-		logger.Info("public paid access enabled", "public_url", cfg.PublicURL, "queue_capacity", cfg.QueueCapacity)
+		logger.Info("public paid access enabled", "public_url", cfg.PublicURL, "payment_provider", cfg.PaymentProvider, "challenge_provider", cfg.ChallengeProvider, "queue_capacity", cfg.QueueCapacity)
 	}
 	jobs, err := app.NewManager(app.ManagerConfig{
 		WorkDir: cfg.WorkDir, MaxUploadBytes: cfg.MaxUploadBytes,
@@ -112,6 +133,7 @@ func main() {
 	sessions := auth.NewManager(cfg.Username, cfg.Password, cfg.SessionTTL, cfg.SessionSecret)
 	api := httpapi.NewWithOptions(sessions, jobs, cfg.MaxUploadBytes, cfg.SecureCookie, httpapi.Options{
 		PublicAccess: cfg.PublicAccess, Commerce: billing, Challenge: challenge, ChallengeSiteKey: cfg.TurnstileSiteKey,
+		ChallengeIssuer: challengeIssuer, ChallengeProvider: cfg.ChallengeProvider,
 		TrustProxyHeaders: cfg.PublicAccess,
 	})
 	server := &http.Server{
@@ -141,4 +163,32 @@ func main() {
 		logger.Error("server stopped unexpectedly", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runVoucherCommand(args []string) error {
+	if len(args) == 0 || args[0] != "generate" {
+		return errors.New("usage: btc-server voucher generate [--credits 5] [--count 1] [--expires 87600h]")
+	}
+	flags := flag.NewFlagSet("voucher generate", flag.ContinueOnError)
+	credits := flags.Int64("credits", 5, "credits granted by each voucher")
+	count := flags.Int("count", 1, "number of vouchers to generate")
+	expires := flags.Duration("expires", 10*365*24*time.Hour, "voucher and wallet recovery lifetime")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *count <= 0 || *count > 1000 {
+		return errors.New("voucher count must be between 1 and 1000")
+	}
+	codec, err := commerce.NewVoucherCodec([]byte(config.ReadSecret("BTC_VOUCHER_SECRET")))
+	if err != nil {
+		return err
+	}
+	for range *count {
+		code, err := codec.Generate(*credits, *expires)
+		if err != nil {
+			return err
+		}
+		fmt.Println(code)
+	}
+	return nil
 }

@@ -7,9 +7,14 @@ const state = {
   access: "private",
   credits: 0,
   pack: null,
+  checkoutEnabled: false,
+  voucherEnabled: false,
+  challengeProvider: "",
+  challengeURL: "",
   challengeSiteKey: "",
-  turnstileToken: "",
+  challengeToken: "",
   turnstileWidgetId: null,
+  altchaWidget: null,
   maxUploadBytes: 100 * 1024 * 1024,
 };
 
@@ -96,6 +101,10 @@ function showWorkspace(session) {
   state.access = session.access || "private";
   state.credits = session.credits || 0;
   state.pack = session.pack || null;
+  state.checkoutEnabled = Boolean(session.checkout_enabled);
+  state.voucherEnabled = Boolean(session.voucher_enabled);
+  state.challengeProvider = session.challenge_provider || "";
+  state.challengeURL = session.challenge_url || "";
   state.challengeSiteKey = session.challenge_site_key || "";
   state.maxUploadBytes = session.max_upload_bytes || state.maxUploadBytes;
   $("uploadLimit").textContent = `${Math.floor(state.maxUploadBytes / 1024 / 1024)} MiB`;
@@ -136,21 +145,33 @@ function renderCommerce() {
   $("creditCount").textContent = String(state.credits);
   const pack = state.pack;
   $("buyButton").textContent = pack ? `购买 ${pack.credits} 次 · ${pack.price_label}` : "购买额度";
+  $("buyButton").hidden = !state.checkoutEnabled;
+  $("redeemForm").hidden = !state.voucherEnabled;
   $("creditNote").textContent = state.credits > 0
     ? "每次创建任务扣除 1 次；转换失败或取消会自动退回。"
-    : "当前没有可用额度。购买后由支付回调自动到账。";
-  loadTurnstile();
+    : state.voucherEnabled
+      ? "当前没有可用额度。输入额度码即可充值或恢复已有钱包。"
+      : "当前没有可用额度。购买后由支付回调自动到账。";
+  loadChallenge();
+}
+
+function loadChallenge() {
+  if (state.challengeProvider === "altcha") {
+    loadALTCHA();
+    return;
+  }
+  if (state.challengeProvider === "turnstile") loadTurnstile();
 }
 
 function loadTurnstile() {
   if (!state.challengeSiteKey || state.turnstileWidgetId !== null) return;
   const render = () => {
     if (!window.turnstile || state.turnstileWidgetId !== null) return;
-    state.turnstileWidgetId = window.turnstile.render("#turnstileWidget", {
+    state.turnstileWidgetId = window.turnstile.render("#challengeWidget", {
       sitekey: state.challengeSiteKey,
-      callback: token => { state.turnstileToken = token; },
-      "expired-callback": () => { state.turnstileToken = ""; },
-      "error-callback": () => { state.turnstileToken = ""; showMessage("人机验证加载失败，请刷新页面重试。"); },
+      callback: token => { state.challengeToken = token; },
+      "expired-callback": () => { state.challengeToken = ""; },
+      "error-callback": () => { state.challengeToken = ""; showMessage("人机验证加载失败，请刷新页面重试。"); },
     });
   };
   if (window.turnstile) {
@@ -169,16 +190,58 @@ function loadTurnstile() {
   }
 }
 
+function loadALTCHA() {
+  if (!state.challengeURL || state.altchaWidget) return;
+  const render = async () => {
+    await customElements.whenDefined("altcha-widget");
+    if (state.altchaWidget) return;
+    const container = $("challengeWidget");
+    const widget = document.createElement("altcha-widget");
+    widget.setAttribute("challenge", state.challengeURL);
+    widget.setAttribute("name", "altcha");
+    widget.setAttribute("type", "checkbox");
+    widget.setAttribute("workers", "2");
+    const capturePayload = event => {
+      queueMicrotask(() => {
+        const input = container.querySelector('input[name="altcha"]');
+        const eventPayload = typeof event.detail?.payload === "string" ? event.detail.payload : "";
+        state.challengeToken = eventPayload || input?.value || "";
+      });
+    };
+    widget.addEventListener("verified", capturePayload);
+    widget.addEventListener("expired", () => { state.challengeToken = ""; });
+    widget.addEventListener("statechange", event => {
+      if (event.detail?.state === "error") showMessage("人机验证失败，请重试。");
+    });
+    container.replaceChildren(widget);
+    state.altchaWidget = widget;
+  };
+  if (customElements.get("altcha-widget")) {
+    render();
+    return;
+  }
+  if (!document.getElementById("altchaScript")) {
+    const script = document.createElement("script");
+    script.id = "altchaScript";
+    script.type = "module";
+    script.src = "https://cdn.jsdelivr.net/npm/altcha@3.2.2/dist/main/altcha.min.js";
+    script.addEventListener("load", render);
+    script.addEventListener("error", () => showMessage("人机验证组件加载失败，请检查网络后刷新页面。"));
+    document.head.appendChild(script);
+  }
+}
+
 function takeChallengeToken() {
-  const token = state.turnstileToken;
+  const token = state.challengeToken;
   if (!token) throw new Error("请先完成人机验证。");
-  state.turnstileToken = "";
+  state.challengeToken = "";
   return token;
 }
 
 function resetChallenge() {
-  state.turnstileToken = "";
+  state.challengeToken = "";
   if (window.turnstile && state.turnstileWidgetId !== null) window.turnstile.reset(state.turnstileWidgetId);
+  if (state.altchaWidget?.reset) state.altchaWidget.reset();
 }
 
 async function refreshSession() {
@@ -186,6 +249,11 @@ async function refreshSession() {
   state.csrf = session.csrf_token;
   state.credits = session.credits || 0;
   state.pack = session.pack || state.pack;
+  state.checkoutEnabled = Boolean(session.checkout_enabled);
+  state.voucherEnabled = Boolean(session.voucher_enabled);
+  state.challengeProvider = session.challenge_provider || state.challengeProvider;
+  state.challengeURL = session.challenge_url || state.challengeURL;
+  state.challengeSiteKey = session.challenge_site_key || state.challengeSiteKey;
   renderCommerce();
   updateSubmitButton();
   return session;
@@ -234,6 +302,33 @@ $("buyButton").addEventListener("click", async () => {
   }
 });
 
+$("redeemForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const code = $("voucherCode").value.trim();
+  if (!code) return;
+  try {
+    const token = takeChallengeToken();
+    $("redeemButton").disabled = true;
+    $("redeemButton").textContent = "正在验证…";
+    const result = await api("/api/v1/billing/redeem", {
+      method: "POST",
+      body: JSON.stringify({code, challenge_token: token}),
+    });
+    state.csrf = result.csrf_token || state.csrf;
+    state.credits = result.credits || 0;
+    $("voucherCode").value = "";
+    renderCommerce();
+    updateSubmitButton();
+    showMessage(result.recovered ? "钱包和剩余额度已恢复。" : `兑换成功，已增加 ${result.credits_added} 次额度。`);
+  } catch (error) {
+    showMessage(error.message);
+  } finally {
+    resetChallenge();
+    $("redeemButton").disabled = false;
+    $("redeemButton").textContent = "兑换或恢复";
+  }
+});
+
 $("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
   try {
@@ -276,7 +371,7 @@ function setUploadPending(pending) {
 function updateSubmitButton() {
   const lacksCredits = state.access === "public" && state.credits < 1;
   $("submitButton").disabled = state.uploading || !fileInput.files[0] || lacksCredits;
-  if (!state.uploading && lacksCredits) $("submitButton").textContent = "请先购买额度";
+  if (!state.uploading && lacksCredits) $("submitButton").textContent = state.voucherEnabled ? "请先兑换额度" : "请先购买额度";
   else if (!state.uploading) $("submitButton").textContent = "开始转换";
 }
 
@@ -380,7 +475,7 @@ $("uploadForm").addEventListener("submit", async event => {
   if (!file || state.uploading) return;
 
   if (state.access === "public" && state.credits < 1) {
-    showMessage("转换额度不足，请先购买额度。");
+    showMessage(state.voucherEnabled ? "转换额度不足，请先兑换额度。" : "转换额度不足，请先购买额度。");
     return;
   }
   state.jobId = "";

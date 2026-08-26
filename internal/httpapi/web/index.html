@@ -6,7 +6,7 @@
   <meta name="description" content="将 PDF 自动转换为可重排或固定版式 EPUB 3。">
   <title>纸间 · PDF 转 EPUB</title>
   <link rel="stylesheet" href="/app.css">
-  <link rel="stylesheet" href="/mode.css?v=public-beta-1">
+  <link rel="stylesheet" href="/mode.css?v=voucher-altcha-1">
 </head>
 <body>
   <header class="masthead">
@@ -43,8 +43,12 @@
         </div>
         <div class="purchase-controls">
           <button id="buyButton" class="secondary-button" type="button">购买额度</button>
-          <div id="turnstileWidget" class="turnstile-widget" aria-label="人机验证"></div>
-          <small>额度暂时绑定当前浏览器，请勿清除本站 Cookie。</small>
+          <form id="redeemForm" class="redeem-form" hidden>
+            <label for="voucherCode">额度码</label>
+            <div><input id="voucherCode" name="voucher" autocomplete="off" spellcheck="false" placeholder="YF1.…" required><button id="redeemButton" class="secondary-button" type="submit">兑换或恢复</button></div>
+          </form>
+          <div id="challengeWidget" class="challenge-widget" aria-label="人机验证"></div>
+          <small>额度码也是钱包恢复凭证，请妥善保存且不要转发给他人。</small>
         </div>
       </section>
 
@@ -91,6 +95,6 @@
   </main>
 
   <footer><span>固定版式保留页面外观；可重排模式不提供 OCR。</span><span>任务与文件在结束 1 小时后清理；失败任务自动退回额度。</span></footer>
-  <script src="/app.js?v=public-beta-1" defer></script>
+  <script src="/app.js?v=voucher-altcha-1" defer></script>
 </body>
 </html>

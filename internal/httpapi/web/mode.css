@@ -40,8 +40,36 @@
   text-align: right;
 }
 
-.turnstile-widget:empty {
+.challenge-widget:empty {
   display: none;
+}
+
+.redeem-form {
+  width: min(440px, 100%);
+  text-align: left;
+}
+
+.redeem-form > label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: .08em;
+}
+
+.redeem-form > div {
+  display: flex;
+  gap: 8px;
+}
+
+.redeem-form input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  padding: 11px 12px;
+  color: var(--ink);
+  font: inherit;
 }
 
 .mode-picker legend {
@@ -129,6 +157,15 @@
   .purchase-controls small {
     max-width: none;
     text-align: left;
+  }
+
+  .redeem-form > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .redeem-form .secondary-button {
+    width: 100%;
   }
 
   .mode-picker {

@@ -144,3 +144,48 @@ func TestLoadRejectsPublicAccessWithoutHTTPSAndPaymentControls(t *testing.T) {
 		t.Fatal("Load() error = nil, want unsafe public access configuration error")
 	}
 }
+
+func TestLoadEnablesPublicVoucherAndALTCHA(t *testing.T) {
+	t.Setenv("BTC_PUBLIC_ACCESS", "true")
+	t.Setenv("BTC_PUBLIC_URL", "https://epub.yi-flow.com")
+	t.Setenv("BTC_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("BTC_SECURE_COOKIE", "true")
+	t.Setenv("BTC_COMMERCE_DB_PATH", "/var/lib/pdf2epub-data/commerce.db")
+	t.Setenv("BTC_PAYMENT_PROVIDER", "voucher")
+	t.Setenv("BTC_VOUCHER_SECRET", "abcdef0123456789abcdef0123456789")
+	t.Setenv("BTC_CHALLENGE_PROVIDER", "altcha")
+	t.Setenv("BTC_R2_ACCOUNT_ID", "account-id")
+	t.Setenv("BTC_R2_ACCESS_KEY_ID", "access-key")
+	t.Setenv("BTC_R2_SECRET_ACCESS_KEY", "secret-key")
+	t.Setenv("BTC_R2_BUCKET", "pdf2epub")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if got.PaymentProvider != "voucher" || got.ChallengeProvider != "altcha" {
+		t.Fatalf("providers = %q / %q", got.PaymentProvider, got.ChallengeProvider)
+	}
+	if got.StripeSecretKey != "" || got.TurnstileSecretKey != "" {
+		t.Fatalf("voucher/ALTCHA mode unexpectedly requires external provider secrets: %#v", got)
+	}
+}
+
+func TestLoadRejectsShortVoucherSecret(t *testing.T) {
+	t.Setenv("BTC_PUBLIC_ACCESS", "true")
+	t.Setenv("BTC_PUBLIC_URL", "https://epub.yi-flow.com")
+	t.Setenv("BTC_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("BTC_SECURE_COOKIE", "true")
+	t.Setenv("BTC_COMMERCE_DB_PATH", "/var/lib/pdf2epub-data/commerce.db")
+	t.Setenv("BTC_PAYMENT_PROVIDER", "voucher")
+	t.Setenv("BTC_VOUCHER_SECRET", "short")
+	t.Setenv("BTC_CHALLENGE_PROVIDER", "altcha")
+	t.Setenv("BTC_R2_ACCOUNT_ID", "account-id")
+	t.Setenv("BTC_R2_ACCESS_KEY_ID", "access-key")
+	t.Setenv("BTC_R2_SECRET_ACCESS_KEY", "secret-key")
+	t.Setenv("BTC_R2_BUCKET", "pdf2epub")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want short voucher secret error")
+	}
+}

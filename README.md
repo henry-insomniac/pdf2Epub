@@ -18,19 +18,25 @@ docker compose up --build -d
 
 生产环境推荐配置 Cloudflare R2 交付成功产物。服务会在转换完成后将 EPUB 上传到私有 bucket；已登录用户点击下载时，API 返回短期签名地址，文件流不再经过应用服务器。私有模式下 R2 不可用会保留本地产物作为降级；公开付费模式则失败并自动退回额度，绝不回退到源站大文件下载。
 
-## 公开付费 Beta
+## 公开额度 Beta
 
-设置 `BTC_PUBLIC_ACCESS=true` 后，页面不再要求共享账号密码，而是为浏览器签发 HMAC 保护的访客会话。每个任务在服务端原子扣除 1 次额度，失败或取消时幂等退款；支付成功页本身不会充值，只有通过 Stripe 验签并与本地订单绑定的 webhook 才能入账。
+设置 `BTC_PUBLIC_ACCESS=true` 后，页面不再要求共享账号密码，而是为浏览器签发 HMAC 保护的访客会话。每个任务在服务端原子扣除 1 次额度，失败或取消时幂等退款。
 
-公开模式是 fail-closed 的：缺少 HTTPS 公网地址、Stripe secret/webhook secret/price、Cloudflare Turnstile、私有 R2、Secure Cookie 或持久化账本路径时，服务拒绝启动。最低上线步骤：
+个人开发者推荐使用 `voucher + altcha`：用户从你选择的任意合规渠道购买后获得额度码，页面兑换后到账；同一额度码再次输入不会重复充值，而是恢复第一次兑换所绑定的钱包。ALTCHA 的挑战由本服务签发和验证，无需申请 Cloudflare Turnstile。最低上线步骤：
 
-1. 在 Stripe 创建固定 Price，并把其 ID、secret key 与 webhook signing secret 写入服务器 secret；webhook 地址为 `https://你的域名/api/v1/billing/webhook`。
-2. 在 Cloudflare Turnstile 创建只允许正式域名的 Managed widget，配置 site key 和 secret key。
-3. 配置私有 R2 bucket 与仅限该 bucket 对象读写的密钥；禁止公开 bucket。
-4. 将源站端口保持在回环地址或防火墙后，由 Cloudflare 和 HTTPS 反向代理接入；Nginx 对上传路径必须设置 `proxy_request_buffering off`，让 Go 在读取大文件前校验一次性上传票据。公开默认 90 MiB，为 Cloudflare 的 [100 MB 请求体限制](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/#upload-limits)预留 multipart 开销。
-5. 核对 `BTC_CREDIT_PACK_LABEL` 与 Stripe Price 的真实币种和金额一致，并完成支付、重复 webhook、取消/失败退款、越权下载和队列满载演练。
+1. 设置 `BTC_PAYMENT_PROVIDER=voucher`、`BTC_CHALLENGE_PROVIDER=altcha`，分别用 `openssl rand -hex 32` 生成 `BTC_SESSION_SECRET` 和 `BTC_VOUCHER_SECRET`。这两个密钥都必须备份；更换 voucher secret 会使旧码失效。
+2. 配置私有 R2 bucket 与仅限该 bucket 对象读写的密钥；禁止公开 bucket。
+3. 将源站端口保持在回环地址或防火墙后，由 HTTPS 反向代理接入；Nginx 对上传路径必须设置 `proxy_request_buffering off`，让 Go 在读取大文件前校验一次性上传票据。
+4. 部署后在容器里生成额度码，并通过你选择的渠道交付；不要把生成结果写入日志、工单或公开聊天：
 
-当前 Beta 的额度身份绑定浏览器 Cookie：清除 Cookie 或更换设备后无法自助找回余额。面向大规模陌生用户投放前，应补充邮件 magic link 的账号恢复、服务条款、隐私政策、退款政策和客服入口；不要把共享管理员登录重新用作用户账号系统。
+```bash
+docker compose exec -T pdf2epub btc-server voucher generate --credits 5 --count 10 > vouchers.txt
+chmod 600 vouchers.txt
+```
+
+5. 完成额度码首次兑换、跨浏览器钱包恢复、重复验证拒绝、失败退款、越权下载和队列满载演练。
+
+额度码同时是钱包恢复凭证，持有者可以在新浏览器恢复该钱包的剩余额度，因此必须像密码一样保管。面向大规模陌生用户投放前，仍应补充订单系统、服务条款、隐私政策、退款政策和客服入口；需要完全自动收款时可切换回 `stripe + turnstile`，账本和任务扣费模型不变。
 
 完整威胁边界与上线阻断项见 [公开付费 Beta 安全清单](docs/security-public-beta.md)。
 
@@ -54,7 +60,7 @@ go run ./cmd/btc-server
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `BTC_ADDR` | `0.0.0.0:8080` | HTTP 监听地址，可部署到服务器 |
-| `BTC_PUBLIC_ACCESS` | `false` | 启用无密码访客、额度和支付；安全配置不完整时拒绝启动 |
+| `BTC_PUBLIC_ACCESS` | `false` | 启用无密码访客和额度；安全配置不完整时拒绝启动 |
 | `BTC_PUBLIC_URL` | 空 | 公开模式的 HTTPS origin，例如 `https://epub.yi-flow.com` |
 | `BTC_USERNAME` | 私有模式必填 | 私有模式唯一内置账号；公开模式不使用 |
 | `BTC_PASSWORD` | 私有模式必填 | 私有模式唯一内置账号密码；公开模式不使用 |
@@ -64,13 +70,16 @@ go run ./cmd/btc-server
 | `BTC_MAX_UPLOAD_MIB` | 私有 100 / 公开 90 | 上传上限；公开默认值为 Cloudflare 100 MB 请求限制预留 multipart 空间 |
 | `BTC_QUEUE_CAPACITY` | 私有 0 / 公开 3 | 单工作器之外允许等待的任务数，最大 20 |
 | `BTC_COMMERCE_DB_PATH` | `/tmp/pdf2epub-commerce/commerce.db` | bbolt 额度、订单、回调和任务扣费账本；不得放在会被启动清理的工作目录 |
-| `BTC_CREDIT_PACK_CREDITS` | `5` | 每个 Stripe Price 对应的转换次数 |
-| `BTC_CREDIT_PACK_LABEL` | `USD 1.99` | UI 展示价格，必须人工核对与 Stripe Price 一致 |
-| `BTC_STRIPE_SECRET_KEY` | 空 | 公开模式必填，只能由服务器读取 |
-| `BTC_STRIPE_WEBHOOK_SECRET` | 空 | 公开模式必填，用于 webhook HMAC 验签 |
-| `BTC_STRIPE_PRICE_ID` | 空 | 公开模式必填，固定额度包的 Stripe Price ID |
-| `BTC_TURNSTILE_SITE_KEY` | 空 | 公开模式必填，可下发浏览器 |
-| `BTC_TURNSTILE_SECRET_KEY` | 空 | 公开模式必填，只能由服务器读取 |
+| `BTC_CREDIT_PACK_CREDITS` | `5` | Stripe 模式中固定额度包的次数 |
+| `BTC_CREDIT_PACK_LABEL` | `5 次额度` | UI 展示额度包或销售说明 |
+| `BTC_PAYMENT_PROVIDER` | 自动 | `voucher` 或 `stripe`；无 Stripe 配置时自动选择 voucher |
+| `BTC_VOUCHER_SECRET` | 空 | voucher 模式必填，至少 32 字节；用于签发和验证额度码 |
+| `BTC_STRIPE_SECRET_KEY` | 空 | Stripe 模式必填，只能由服务器读取 |
+| `BTC_STRIPE_WEBHOOK_SECRET` | 空 | Stripe 模式必填，用于 webhook HMAC 验签 |
+| `BTC_STRIPE_PRICE_ID` | 空 | Stripe 模式必填，固定额度包的 Stripe Price ID |
+| `BTC_CHALLENGE_PROVIDER` | 自动 | `altcha` 或 `turnstile`；无 Turnstile 配置时自动选择 ALTCHA |
+| `BTC_TURNSTILE_SITE_KEY` | 空 | Turnstile 模式必填，可下发浏览器 |
+| `BTC_TURNSTILE_SECRET_KEY` | 空 | Turnstile 模式必填，只能由服务器读取 |
 | `BTC_EPUBCHECK_COMMAND` | `epubcheck` | EPUBCheck 可执行命令 |
 | `BTC_REQUIRE_EPUBCHECK` | `true` | 是否缺少 EPUBCheck 时拒绝成功 |
 | `BTC_FIXED_LAYOUT_DPI` | `144` | 固定版式页面渲染 DPI，允许 72–200 |
@@ -90,8 +99,10 @@ go run ./cmd/btc-server
 - `GET /api/v1/meta`：读取是否启用公开模式。
 - `POST /api/v1/auth/logout`：退出。
 - `GET /api/v1/session`：恢复会话。
-- `POST /api/v1/upload-tickets`：公开模式使用 Turnstile token 换取两分钟、一次性的上传票据。
-- `POST /api/v1/billing/checkout`：创建固定额度包的 Stripe Checkout。
+- `GET /api/v1/challenge`：ALTCHA 模式签发两分钟有效的工作量证明挑战。
+- `POST /api/v1/upload-tickets`：公开模式使用一次性人机验证结果换取两分钟、一次性的上传票据。
+- `POST /api/v1/billing/redeem`：兑换额度码，或在新浏览器恢复该码首次绑定的钱包。
+- `POST /api/v1/billing/checkout`：Stripe 模式创建固定额度包的 Checkout。
 - `POST /api/v1/billing/webhook`：Stripe 验签与幂等入账入口。
 - `POST /api/v1/jobs`：以 multipart 字段 `file` 上传一个 PDF；`mode` 可为 `auto`、`reflowable` 或 `fixed`，默认 `auto`。
 - `GET /api/v1/jobs/{id}`：获取任务阶段与页数进度。

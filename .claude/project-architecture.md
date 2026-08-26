@@ -13,10 +13,10 @@
 ├── cmd/btc-server/         # HTTP 服务启动与优雅退出
 ├── internal/
 │   ├── app/                # 单任务调度、取消、超时和保留
-│   ├── abuse/              # Turnstile 服务端验证
+│   ├── abuse/              # ALTCHA 挑战签发/验签与 Turnstile 验证
 │   ├── artifactstore/      # R2 产物上传、签名下载与删除
 │   ├── auth/               # 私有登录、签名访客会话和 CSRF
-│   ├── commerce/           # 持久化额度账本、订单、Stripe 网关与幂等回调
+│   ├── commerce/           # 持久化额度账本、额度码钱包、Stripe 与幂等回调
 │   ├── config/             # 环境变量及 secret file 配置
 │   ├── conversion/         # 中间内容模型和段落重建
 │   ├── converter/          # PDFium→重建→EPUBCheck 编排
@@ -42,7 +42,8 @@
 │       ├── 0008-pdfium-wasm-and-epubcheck.md
 │       ├── 0009-r2-artifact-delivery.md
 │       ├── 0010-adaptive-reflowable-and-fixed-layout.md
-│       └── 0011-public-paid-beta.md
+│       ├── 0011-public-paid-beta.md
+│       └── 0012-voucher-wallet-and-altcha.md
 └── .claude/
     ├── README.md
     ├── project-architecture.md
@@ -138,13 +139,14 @@ Agent 入口文件。用于说明项目目标、协作原则和关键文档索�
 - V1 是可部署到服务器并供远程浏览器访问的 Web 服务。
 - 监听地址和端口必须可配置，并允许在受控部署环境中监听非回环地址。
 - 私有模式使用一个内置账号登录；公开付费 Beta 不展示密码登录，而是签发 HMAC 保护的长期访客会话。
-- 账号、会话、支付、Turnstile 和 R2 密钥通过环境变量或密钥文件注入，不得写入源码、镜像、前端或仓库。
+- 账号、会话、额度码、支付、Turnstile 和 R2 密钥通过环境变量或密钥文件注入，不得写入源码、镜像、前端或仓库。
 - 公开模式的任务、额度、订单和下载都绑定服务端 `subject ID`；任务 owner 不匹配统一返回 404，不能只依赖前端隐藏按钮。
-- 公开模式在上传前检查额度，并要求 Turnstile 换取两分钟、一次性且绑定 subject 的上传票据；上传票据在读取 multipart body 前消费。
+- 公开模式在上传前检查额度，并要求 ALTCHA 或 Turnstile 验证结果换取两分钟、一次性且绑定 subject 的上传票据；上传票据在读取 multipart body 前消费。
 - 公开模式同时使用来源 IP 和 subject token bucket 限流；Cloudflare WAF/Rate Limiting、源站防火墙和容器资源限制仍是独立防线，应用限流不能替代边缘防护。
 - 每个任务原子扣除 1 个整数额度；失败、取消或任务接受后的基础设施错误幂等退款，成功任务完成扣费。
-- 支付回跳页面不产生额度；只有 Stripe webhook 通过时间窗和 HMAC 验签、与本地订单的 account/order/session 绑定一致且事件未处理时才入账。
-- 公开模式缺少 Secure Cookie、HTTPS origin、支付、Turnstile、私有 R2 或持久化账本配置时必须拒绝启动，不能降级成匿名免费转换。
+- `voucher` provider 中额度码首次使用只入账一次，再次使用只恢复首次绑定的钱包；额度码属于 bearer credential，不记录完整码到日志。
+- `stripe` provider 中支付回跳页面不产生额度；只有 webhook 通过时间窗和 HMAC 验签、与本地订单的 account/order/session 绑定一致且事件未处理时才入账。
+- 公开模式缺少 Secure Cookie、HTTPS origin、所选额度 provider、所选挑战 provider、私有 R2 或持久化账本配置时必须拒绝启动，不能降级成匿名免费转换。
 - PDF、转换中间文件和 EPUB 均在服务端处理和临时存储。
 - 单个 PDF 最大 `100 MiB`、最多 `1000` 页；超限文件必须明确拒绝并显示实际值与允许上限。
 - V1 不收集 PDF 密码；需要密码、采用加密保护或禁止提取内容的 PDF 必须在预检时明确拒绝。
@@ -232,3 +234,4 @@ Agent 入口文件。用于说明项目目标、协作原则和关键文档索�
 | 2026-08-25 | 使用 R2 交付成功 EPUB | 避免大文件下载受单台新加坡 VPS 公网出口限制，同时保留认证和一小时清理语义 | 对象存储、调度和 HTTP 重定向测试通过 |
 | 2026-08-25 | 自适应输出可重排或固定版式 EPUB | 让图片型复杂 PDF 保留完整页面并支持双页阅读，同时避免水印文本伪装成正文 | 模式 API、自动检测、固定版式打包和真实样本验证 |
 | 2026-08-26 | 增加公开付费 Beta | 去掉面向用户的共享密码，同时以访客身份、持久化额度、幂等支付、任务 owner、Turnstile 和有限队列控制商业化与滥用风险 | `go test ./...`、`go vet ./...`、支付/退款/越权/队列/Turnstile 回归测试 |
+| 2026-08-26 | 增加额度码钱包与 ALTCHA provider | 让个人运营者无需 Stripe/Turnstile 账号也能交付额度，并允许用户持码跨浏览器恢复钱包 | 额度码签名/幂等/恢复、ALTCHA 签发/验签/重放、HTTP 与配置回归测试 |

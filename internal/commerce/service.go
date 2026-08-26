@@ -55,6 +55,13 @@ type CheckoutResult struct {
 	URL       string
 }
 
+type VoucherRedemption struct {
+	AccountID    string `json:"-"`
+	Credits      int64  `json:"credits"`
+	Recovered    bool   `json:"recovered"`
+	CreditsAdded int64  `json:"credits_added"`
+}
+
 type PaymentEvent struct {
 	ID        string
 	Type      string
@@ -71,10 +78,11 @@ type Gateway interface {
 }
 
 type Config struct {
-	DatabasePath string
-	PublicURL    string
-	Pack         Pack
-	Gateway      Gateway
+	DatabasePath  string
+	PublicURL     string
+	Pack          Pack
+	Gateway       Gateway
+	VoucherSecret []byte
 }
 
 type Service struct {
@@ -82,6 +90,7 @@ type Service struct {
 	publicURL string
 	pack      Pack
 	gateway   Gateway
+	vouchers  *VoucherCodec
 	now       func() time.Time
 }
 
@@ -123,11 +132,22 @@ func Open(config Config) (*Service, error) {
 	if strings.TrimSpace(config.DatabasePath) == "" {
 		return nil, errors.New("commerce database path is required")
 	}
-	if config.Pack.Credits <= 0 || config.Pack.PriceID == "" || config.Pack.PriceLabel == "" {
-		return nil, errors.New("a positive credit pack with a provider price is required")
+	if config.Pack.Credits <= 0 || config.Pack.PriceLabel == "" {
+		return nil, errors.New("a positive credit pack and label are required")
 	}
-	if config.Gateway == nil {
-		return nil, errors.New("payment gateway is required")
+	if config.Gateway != nil && config.Pack.PriceID == "" {
+		return nil, errors.New("a provider price is required when checkout is enabled")
+	}
+	var vouchers *VoucherCodec
+	if len(config.VoucherSecret) > 0 {
+		var err error
+		vouchers, err = NewVoucherCodec(config.VoucherSecret)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if config.Gateway == nil && vouchers == nil {
+		return nil, errors.New("a payment gateway or voucher secret is required")
 	}
 	directory := filepath.Dir(config.DatabasePath)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -142,6 +162,7 @@ func Open(config Config) (*Service, error) {
 		publicURL: strings.TrimRight(config.PublicURL, "/"),
 		pack:      config.Pack,
 		gateway:   config.Gateway,
+		vouchers:  vouchers,
 		now:       func() time.Time { return time.Now().UTC() },
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
@@ -168,6 +189,14 @@ func (s *Service) Close() error {
 
 func (s *Service) Pack() Pack {
 	return Pack{Credits: s.pack.Credits, PriceLabel: s.pack.PriceLabel}
+}
+
+func (s *Service) CheckoutEnabled() bool {
+	return s.gateway != nil && s.pack.PriceID != ""
+}
+
+func (s *Service) VouchersEnabled() bool {
+	return s.vouchers != nil
 }
 
 func (s *Service) EnsureAccount(ctx context.Context, accountID string) error {
@@ -312,7 +341,7 @@ func (s *Service) CreateCheckout(ctx context.Context, accountID string) (Checkou
 	if err := validateAccount(ctx, accountID); err != nil {
 		return CheckoutResult{}, err
 	}
-	if s.publicURL == "" {
+	if s.publicURL == "" || !s.CheckoutEnabled() {
 		return CheckoutResult{}, ErrBillingUnavailable
 	}
 	orderID, err := randomID("ord_")
@@ -360,7 +389,48 @@ func (s *Service) CreateCheckout(ctx context.Context, accountID string) (Checkou
 	return result, nil
 }
 
+func (s *Service) RedeemVoucher(ctx context.Context, accountID, code string) (VoucherRedemption, error) {
+	if err := validateAccount(ctx, accountID); err != nil {
+		return VoucherRedemption{}, err
+	}
+	if s.vouchers == nil {
+		return VoucherRedemption{}, ErrBillingUnavailable
+	}
+	claims, err := s.vouchers.parse(code)
+	if err != nil {
+		return VoucherRedemption{}, err
+	}
+	redemption := VoucherRedemption{AccountID: accountID}
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		reference := "voucher:" + claims.ID
+		if entryID := tx.Bucket(referenceBucket).Get([]byte(reference)); entryID != nil {
+			value := tx.Bucket(ledgerBucket).Get(entryID)
+			var entry ledgerEntry
+			if value == nil || json.Unmarshal(value, &entry) != nil || entry.Reason != "voucher_redeemed" || entry.AccountID == "" {
+				return ErrVoucherRedeemed
+			}
+			redemption.AccountID = entry.AccountID
+			redemption.Credits = decodeInt64(tx.Bucket(balancesBucket).Get([]byte(entry.AccountID)))
+			redemption.Recovered = true
+			return nil
+		}
+		if err := s.ensureAccountTx(tx, accountID); err != nil {
+			return err
+		}
+		if err := s.addLedgerEntryTx(tx, accountID, claims.Credits, "voucher_redeemed", reference); err != nil {
+			return err
+		}
+		redemption.Credits = decodeInt64(tx.Bucket(balancesBucket).Get([]byte(accountID)))
+		redemption.CreditsAdded = claims.Credits
+		return nil
+	})
+	return redemption, err
+}
+
 func (s *Service) HandleWebhook(ctx context.Context, payload []byte, signature string) (bool, error) {
+	if !s.CheckoutEnabled() {
+		return false, ErrBillingUnavailable
+	}
 	event, err := s.gateway.VerifyWebhook(payload, signature)
 	if err != nil {
 		return false, err
