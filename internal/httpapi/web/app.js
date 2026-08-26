@@ -4,6 +4,13 @@ const state = {
   timer: null,
   uploadRequest: null,
   uploading: false,
+  access: "private",
+  credits: 0,
+  pack: null,
+  challengeSiteKey: "",
+  turnstileToken: "",
+  turnstileWidgetId: null,
+  maxUploadBytes: 100 * 1024 * 1024,
 };
 
 const $ = id => document.getElementById(id);
@@ -20,6 +27,13 @@ const stages = {
 };
 
 class UploadCanceledError extends Error {}
+class APIError extends Error {
+  constructor(message, code, status) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -33,17 +47,18 @@ async function api(url, options = {}) {
   });
   if (response.status === 204) return null;
   const body = await response.json().catch(() => ({error: {message: "服务器返回了无法识别的响应。"}}));
-  if (!response.ok) throw new Error(body.error?.message || "请求失败，请稍后重试。");
+  if (!response.ok) throw new APIError(body.error?.message || "请求失败，请稍后重试。", body.error?.code || "request.failed", response.status);
   return body;
 }
 
-function uploadJob(form, onProgress) {
+function uploadJob(form, uploadTicket, onProgress) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     state.uploadRequest = request;
     request.open("POST", "/api/v1/jobs");
     request.withCredentials = true;
     if (state.csrf) request.setRequestHeader("X-CSRF-Token", state.csrf);
+    if (uploadTicket) request.setRequestHeader("X-Upload-Ticket", uploadTicket);
     request.upload.addEventListener("progress", event => {
       onProgress(event.loaded, event.lengthComputable ? event.total : 0);
     });
@@ -78,21 +93,146 @@ function showMessage(message) {
 
 function showWorkspace(session) {
   state.csrf = session.csrf_token;
+  state.access = session.access || "private";
+  state.credits = session.credits || 0;
+  state.pack = session.pack || null;
+  state.challengeSiteKey = session.challenge_site_key || "";
+  state.maxUploadBytes = session.max_upload_bytes || state.maxUploadBytes;
+  $("uploadLimit").textContent = `${Math.floor(state.maxUploadBytes / 1024 / 1024)} MiB`;
   $("loginPanel").hidden = true;
   $("workspace").hidden = false;
-  $("logoutButton").hidden = false;
+  $("logoutButton").hidden = state.access === "public";
+  renderCommerce();
+  updateSubmitButton();
   if (state.jobId) pollJob();
 }
 
 async function restore() {
   try {
-    showWorkspace(await api("/api/v1/session"));
-  } catch {
+    const meta = await api("/api/v1/meta");
+    if (meta.has_session) {
+      showWorkspace(await api("/api/v1/session"));
+      reconcileCheckoutReturn();
+      return;
+    }
     state.jobId = "";
     sessionStorage.removeItem("btc_job_id");
+    if (meta.public_access) {
+      showWorkspace(await api("/api/v1/auth/guest", {method: "POST", body: "{}"}));
+      reconcileCheckoutReturn();
+      return;
+    }
+    $("loginPanel").hidden = false;
+  } catch (error) {
+    showMessage(error.message);
     $("loginPanel").hidden = false;
   }
 }
+
+function renderCommerce() {
+  const publicMode = state.access === "public";
+  $("commercePanel").hidden = !publicMode;
+  if (!publicMode) return;
+  $("creditCount").textContent = String(state.credits);
+  const pack = state.pack;
+  $("buyButton").textContent = pack ? `购买 ${pack.credits} 次 · ${pack.price_label}` : "购买额度";
+  $("creditNote").textContent = state.credits > 0
+    ? "每次创建任务扣除 1 次；转换失败或取消会自动退回。"
+    : "当前没有可用额度。购买后由支付回调自动到账。";
+  loadTurnstile();
+}
+
+function loadTurnstile() {
+  if (!state.challengeSiteKey || state.turnstileWidgetId !== null) return;
+  const render = () => {
+    if (!window.turnstile || state.turnstileWidgetId !== null) return;
+    state.turnstileWidgetId = window.turnstile.render("#turnstileWidget", {
+      sitekey: state.challengeSiteKey,
+      callback: token => { state.turnstileToken = token; },
+      "expired-callback": () => { state.turnstileToken = ""; },
+      "error-callback": () => { state.turnstileToken = ""; showMessage("人机验证加载失败，请刷新页面重试。"); },
+    });
+  };
+  if (window.turnstile) {
+    render();
+    return;
+  }
+  if (!document.getElementById("turnstileScript")) {
+    const script = document.createElement("script");
+    script.id = "turnstileScript";
+    script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    script.async = true;
+    script.defer = true;
+    script.addEventListener("load", render);
+    script.addEventListener("error", () => showMessage("人机验证加载失败，请检查网络后刷新页面。"));
+    document.head.appendChild(script);
+  }
+}
+
+function takeChallengeToken() {
+  const token = state.turnstileToken;
+  if (!token) throw new Error("请先完成人机验证。");
+  state.turnstileToken = "";
+  return token;
+}
+
+function resetChallenge() {
+  state.turnstileToken = "";
+  if (window.turnstile && state.turnstileWidgetId !== null) window.turnstile.reset(state.turnstileWidgetId);
+}
+
+async function refreshSession() {
+  const session = await api("/api/v1/session");
+  state.csrf = session.csrf_token;
+  state.credits = session.credits || 0;
+  state.pack = session.pack || state.pack;
+  renderCommerce();
+  updateSubmitButton();
+  return session;
+}
+
+async function reconcileCheckoutReturn() {
+  const params = new URLSearchParams(location.search);
+  const checkout = params.get("checkout");
+  if (!checkout) return;
+  history.replaceState({}, "", location.pathname);
+  if (checkout === "canceled") {
+    showMessage("支付已取消，没有扣款或增加额度。");
+    return;
+  }
+  showMessage("支付已返回，正在等待支付平台确认额度…");
+  const initial = state.credits;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    try {
+      await refreshSession();
+      if (state.credits > initial) {
+        showMessage("额度已到账，可以开始转换。");
+        return;
+      }
+    } catch {}
+  }
+  showMessage("支付仍在确认中。额度到账后页面会在下次刷新时显示；请勿重复支付。");
+}
+
+$("buyButton").addEventListener("click", async () => {
+  try {
+    const token = takeChallengeToken();
+    $("buyButton").disabled = true;
+    $("buyButton").textContent = "正在创建支付页面…";
+    const result = await api("/api/v1/billing/checkout", {
+      method: "POST",
+      body: JSON.stringify({turnstile_token: token}),
+    });
+    location.assign(result.checkout_url);
+  } catch (error) {
+    resetChallenge();
+    showMessage(error.message);
+    renderCommerce();
+  } finally {
+    $("buyButton").disabled = false;
+  }
+});
 
 $("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
@@ -130,14 +270,20 @@ function setUploadPending(pending) {
   state.uploading = pending;
   $("uploadForm").setAttribute("aria-busy", String(pending));
   setSourceControlsDisabled(pending);
-  $("submitButton").disabled = pending || !fileInput.files[0];
-  if (!pending) $("submitButton").textContent = "开始转换";
+  updateSubmitButton();
+}
+
+function updateSubmitButton() {
+  const lacksCredits = state.access === "public" && state.credits < 1;
+  $("submitButton").disabled = state.uploading || !fileInput.files[0] || lacksCredits;
+  if (!state.uploading && lacksCredits) $("submitButton").textContent = "请先购买额度";
+  else if (!state.uploading) $("submitButton").textContent = "开始转换";
 }
 
 function selectFile(file) {
   if (!file) return;
-  if (file.size > 100 * 1024 * 1024) {
-    showMessage("PDF 不能超过 100 MiB。");
+  if (file.size > state.maxUploadBytes) {
+    showMessage(`PDF 不能超过 ${Math.floor(state.maxUploadBytes / 1024 / 1024)} MiB。`);
     fileInput.value = "";
     return;
   }
@@ -147,7 +293,7 @@ function selectFile(file) {
     return;
   }
   $("fileLabel").textContent = file.name;
-  $("submitButton").disabled = false;
+  updateSubmitButton();
   $("clearButton").hidden = false;
 }
 
@@ -233,28 +379,55 @@ $("uploadForm").addEventListener("submit", async event => {
   const file = fileInput.files[0];
   if (!file || state.uploading) return;
 
-  const form = new FormData();
-  form.append("file", file);
-  form.append("mode", document.querySelector('input[name="mode"]:checked')?.value || "auto");
+  if (state.access === "public" && state.credits < 1) {
+    showMessage("转换额度不足，请先购买额度。");
+    return;
+  }
   state.jobId = "";
   sessionStorage.removeItem("btc_job_id");
   setUploadPending(true);
-  renderUpload(0, file.size);
+  let uploadTicket = "";
+  if (state.access === "public") {
+    $("jobPanel").hidden = false;
+    $("jobTitle").textContent = "正在验证上传请求";
+    $("statusPill").textContent = "安全验证";
+    $("jobDetail").textContent = "正在验证本次操作，通过后立即开始上传。";
+  } else {
+    renderUpload(0, file.size);
+  }
   $("jobPanel").scrollIntoView({behavior: "smooth", block: "nearest"});
 
   try {
-    const job = await uploadJob(form, renderUpload);
+    if (state.access === "public") {
+      const token = takeChallengeToken();
+      const ticket = await api("/api/v1/upload-tickets", {
+        method: "POST",
+        body: JSON.stringify({turnstile_token: token}),
+      });
+      uploadTicket = ticket.upload_ticket;
+      resetChallenge();
+      renderUpload(0, file.size);
+    }
+    const form = new FormData();
+    form.append("file", file);
+    form.append("mode", document.querySelector('input[name="mode"]:checked')?.value || "auto");
+    const job = await uploadJob(form, uploadTicket, renderUpload);
     state.uploading = false;
     $("uploadForm").setAttribute("aria-busy", "false");
     setSourceControlsDisabled(false);
     $("submitButton").disabled = true;
     $("submitButton").textContent = "转换进行中";
     state.jobId = job.id;
+    if (state.access === "public") {
+      state.credits = Math.max(0, state.credits - 1);
+      renderCommerce();
+    }
     sessionStorage.setItem("btc_job_id", job.id);
     renderJob(job);
     pollJob();
   } catch (error) {
     setUploadPending(false);
+    resetChallenge();
     if (error instanceof UploadCanceledError) {
       renderUploadCanceled();
       return;
@@ -311,7 +484,10 @@ function renderJob(job) {
   $("cancelButton").hidden = terminal;
   $("downloadButton").hidden = job.status !== "succeeded";
   if (job.status === "succeeded") $("downloadButton").href = `/api/v1/jobs/${job.id}/download`;
-  if (terminal) setUploadPending(false);
+  if (terminal) {
+    setUploadPending(false);
+    if (state.access === "public" && job.status !== "succeeded") refreshSession().catch(() => {});
+  }
   $("jobPanel").scrollIntoView({behavior: "smooth", block: "nearest"});
   return terminal;
 }

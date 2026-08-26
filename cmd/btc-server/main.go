@@ -9,9 +9,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"pdf2epub/internal/abuse"
 	"pdf2epub/internal/app"
 	"pdf2epub/internal/artifactstore"
 	"pdf2epub/internal/auth"
+	"pdf2epub/internal/commerce"
 	"pdf2epub/internal/config"
 	"pdf2epub/internal/converter"
 	"pdf2epub/internal/httpapi"
@@ -52,10 +54,54 @@ func main() {
 		}
 		logger.Info("R2 artifact delivery enabled", "bucket", cfg.R2Bucket, "prefix", cfg.R2Prefix)
 	}
+	var billing *commerce.Service
+	var challenge abuse.Verifier
+	var authorizeJob func(context.Context, string, string) error
+	var onJobOutcome func(context.Context, app.JobOutcome)
+	if cfg.PublicAccess {
+		stripe, err := commerce.NewStripeGateway(commerce.StripeConfig{
+			SecretKey: cfg.StripeSecretKey, WebhookSecret: cfg.StripeWebhookSecret,
+		})
+		if err != nil {
+			logger.Error("initialize Stripe gateway", "error", err)
+			os.Exit(1)
+		}
+		billing, err = commerce.Open(commerce.Config{
+			DatabasePath: cfg.CommerceDBPath,
+			PublicURL:    cfg.PublicURL,
+			Pack: commerce.Pack{
+				Credits: cfg.CreditPackCredits, PriceLabel: cfg.CreditPackLabel, PriceID: cfg.StripePriceID,
+			},
+			Gateway: stripe,
+		})
+		if err != nil {
+			logger.Error("initialize commerce ledger", "error", err)
+			os.Exit(1)
+		}
+		defer func() {
+			if err := billing.Close(); err != nil {
+				logger.Error("close commerce ledger", "error", err)
+			}
+		}()
+		challenge, err = abuse.NewTurnstile(abuse.TurnstileConfig{SecretKey: cfg.TurnstileSecretKey})
+		if err != nil {
+			logger.Error("initialize Turnstile verifier", "error", err)
+			os.Exit(1)
+		}
+		authorizeJob = billing.AuthorizeJob
+		onJobOutcome = func(ctx context.Context, outcome app.JobOutcome) {
+			if err := billing.RecordJobOutcome(ctx, outcome); err != nil {
+				logger.Error("record billable job outcome", "job_id", outcome.JobID, "error", err)
+			}
+		}
+		logger.Info("public paid access enabled", "public_url", cfg.PublicURL, "queue_capacity", cfg.QueueCapacity)
+	}
 	jobs, err := app.NewManager(app.ManagerConfig{
 		WorkDir: cfg.WorkDir, MaxUploadBytes: cfg.MaxUploadBytes,
 		JobTimeout: cfg.JobTimeout, Retention: cfg.Retention,
 		DownloadURLTTL: cfg.DownloadURLTTL, ArtifactStore: store,
+		RequireArtifactStore: cfg.PublicAccess,
+		QueueCapacity:        cfg.QueueCapacity, AuthorizeJob: authorizeJob, OnJobOutcome: onJobOutcome,
 	}, conversionService)
 	if err != nil {
 		logger.Error("initialize job manager", "error", err)
@@ -64,7 +110,10 @@ func main() {
 	defer jobs.Close()
 
 	sessions := auth.NewManager(cfg.Username, cfg.Password, cfg.SessionTTL, cfg.SessionSecret)
-	api := httpapi.New(sessions, jobs, cfg.MaxUploadBytes, cfg.SecureCookie)
+	api := httpapi.NewWithOptions(sessions, jobs, cfg.MaxUploadBytes, cfg.SecureCookie, httpapi.Options{
+		PublicAccess: cfg.PublicAccess, Commerce: billing, Challenge: challenge, ChallengeSiteKey: cfg.TurnstileSiteKey,
+		TrustProxyHeaders: cfg.PublicAccess,
+	})
 	server := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           api.Handler(),

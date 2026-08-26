@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.107.3
 	github.com/klippa-app/go-pdfium v1.19.8
 	github.com/tetratelabs/wazero v1.12.0
+	go.etcd.io/bbolt v1.4.3
 )
 
 require (

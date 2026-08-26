@@ -151,6 +151,42 @@ func TestManagerFallsBackToLocalDownloadWhenPublishFails(t *testing.T) {
 	}
 }
 
+func TestManagerFailsWhenRequiredArtifactStorePublishFails(t *testing.T) {
+	manager, err := NewManager(ManagerConfig{
+		WorkDir:              t.TempDir(),
+		MaxUploadBytes:       1024,
+		JobTimeout:           time.Second,
+		Retention:            time.Hour,
+		ArtifactStore:        &artifactStoreStub{publishErr: errors.New("R2 unavailable")},
+		RequireArtifactStore: true,
+	}, converterFunc(func(_ context.Context, request ConversionRequest, _ Reporter) (ConversionResult, error) {
+		artifactPath := filepath.Join(request.JobDir, "book.epub")
+		if err := os.WriteFile(artifactPath, []byte("epub"), 0o600); err != nil {
+			return ConversionResult{}, err
+		}
+		return ConversionResult{Artifact: domain.Artifact{Name: "book.epub", Path: artifactPath, Size: 4}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewManager(): %v", err)
+	}
+	t.Cleanup(manager.Close)
+
+	job, err := manager.Submit("book.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test"))
+	if err != nil {
+		t.Fatalf("Submit(): %v", err)
+	}
+	finished := waitForTerminal(t, manager, job.ID)
+	if finished.Status != domain.JobFailed || finished.Failure == nil {
+		t.Fatalf("snapshot = %#v", finished)
+	}
+	if finished.Failure.Code != "delivery.object_store_unavailable" || finished.Artifact != nil {
+		t.Fatalf("failure/artifact = %#v / %#v", finished.Failure, finished.Artifact)
+	}
+	if _, err := manager.Download(context.Background(), job.ID); !errors.Is(err, ErrArtifactUnavailable) {
+		t.Fatalf("Download() error = %v, want ErrArtifactUnavailable", err)
+	}
+}
+
 func TestManagerCancelsAndReleasesSlot(t *testing.T) {
 	root := t.TempDir()
 	started := make(chan struct{})
@@ -230,6 +266,105 @@ func TestManagerRejectsOversizedUpload(t *testing.T) {
 
 	if _, err := manager.Submit("book.pdf", ConversionModeAuto, bytes.NewBufferString("12345")); !errors.Is(err, ErrUploadTooLarge) {
 		t.Fatalf("Submit() error = %v, want ErrUploadTooLarge", err)
+	}
+}
+
+func TestManagerEnforcesJobOwnership(t *testing.T) {
+	release := make(chan struct{})
+	manager, err := NewManager(ManagerConfig{
+		WorkDir:        t.TempDir(),
+		MaxUploadBytes: 1024,
+		JobTimeout:     time.Second,
+		Retention:      time.Hour,
+	}, converterFunc(func(ctx context.Context, _ ConversionRequest, _ Reporter) (ConversionResult, error) {
+		select {
+		case <-release:
+			return ConversionResult{}, errors.New("fixture stopped")
+		case <-ctx.Done():
+			return ConversionResult{}, ctx.Err()
+		}
+	}))
+	if err != nil {
+		t.Fatalf("NewManager(): %v", err)
+	}
+	t.Cleanup(manager.Close)
+
+	job, err := manager.SubmitFor("owner-a", "book.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF test"))
+	if err != nil {
+		t.Fatalf("SubmitFor(): %v", err)
+	}
+	if _, ok := manager.GetFor("owner-b", job.ID); ok {
+		t.Fatal("another owner could read the job")
+	}
+	if err := manager.CancelFor("owner-b", job.ID); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("cross-owner CancelFor() error = %v, want ErrJobNotFound", err)
+	}
+	if _, err := manager.DownloadFor(context.Background(), "owner-b", job.ID); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("cross-owner DownloadFor() error = %v, want ErrJobNotFound", err)
+	}
+	close(release)
+}
+
+func TestManagerRunsBoundedQueueWithOneWorker(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var calls int
+	var mu sync.Mutex
+	manager, err := NewManager(ManagerConfig{
+		WorkDir:        t.TempDir(),
+		MaxUploadBytes: 1024,
+		JobTimeout:     time.Second,
+		Retention:      time.Hour,
+		QueueCapacity:  1,
+	}, converterFunc(func(_ context.Context, request ConversionRequest, _ Reporter) (ConversionResult, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		} else {
+			close(secondStarted)
+		}
+		path := filepath.Join(request.JobDir, "book.epub")
+		if err := os.WriteFile(path, []byte("epub"), 0o600); err != nil {
+			return ConversionResult{}, err
+		}
+		return ConversionResult{Artifact: domain.Artifact{Name: "book.epub", Path: path, Size: 4}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewManager(): %v", err)
+	}
+	t.Cleanup(manager.Close)
+
+	first, err := manager.SubmitFor("owner-a", "first.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF first"))
+	if err != nil {
+		t.Fatalf("first SubmitFor(): %v", err)
+	}
+	<-firstStarted
+	second, err := manager.SubmitFor("owner-b", "second.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF second"))
+	if err != nil {
+		t.Fatalf("queued SubmitFor(): %v", err)
+	}
+	if snapshot, _ := manager.GetFor("owner-b", second.ID); snapshot.Status != domain.JobQueued {
+		t.Fatalf("queued status = %q, want queued", snapshot.Status)
+	}
+	if _, err := manager.SubmitFor("owner-c", "third.pdf", ConversionModeAuto, bytes.NewBufferString("%PDF third")); !errors.Is(err, ErrBusy) {
+		t.Fatalf("overflow SubmitFor() error = %v, want ErrBusy", err)
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("second job started before first job completed")
+	default:
+	}
+	close(releaseFirst)
+	if snapshot := waitForTerminal(t, manager, first.ID); snapshot.Status != domain.JobSucceeded {
+		t.Fatalf("first status = %q", snapshot.Status)
+	}
+	if snapshot := waitForTerminal(t, manager, second.ID); snapshot.Status != domain.JobSucceeded {
+		t.Fatalf("second status = %q", snapshot.Status)
 	}
 }
 
